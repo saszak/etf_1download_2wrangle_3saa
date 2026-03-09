@@ -1,0 +1,143 @@
+---
+title: 'Sovereign ETF Intelligence'
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: 
+      version: 4
+      bg: '#F8F9FA'
+      fg: '#1A1A1A'
+      primary: '#003049'
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(PerformanceAnalytics)
+library(scales)
+library(here)
+
+if(!exists('project_tree')) source(here('project_tree.R'))
+if(file.exists(here(project_tree$scripts$advanced_reporting))) {
+  source(here(project_tree$scripts$advanced_reporting))
+}
+```
+
+Main Dashboard
+=====================================
+
+Sidebar {.sidebar}
+-----------------------------------------------------------------------
+### Global Controls
+
+```{r}
+checkboxInput('outlier_adj', 'Enable Outlier Management', value = TRUE)
+helpText('Sovereign Intelligence Suite v3.2')
+helpText('Status: Technical Signal Engine Active')
+```
+
+Row {data-height=600}
+-----------------------------------------------------------------------
+### Analytical Sigma: Statistical Shock Analysis (Daily Z-Score)
+```{r}
+renderPlot({ p_sigma })
+```
+
+Row {data-height=400}
+-----------------------------------------------------------------------
+### Nominal Performance View: Actual YTD % (Price-Based)
+```{r}
+renderPlot({ p_quad_nominal })
+```
+### Annualized Efficiency Frontier
+```{r}
+renderPlot({ p_eff })
+```
+
+Technicals Page
+=====================================
+
+Sidebar {.sidebar}
+-----------------------------------------------------------------------
+### Technical Logic
+
+**Exhaustion Signal:** Price stretch (>10MA) combined with extreme Sigma (>2Z).
+
+**Strength Buy:** Price < 10MA in a long-term uptrend (200MA > 0).
+
+```{r}
+cats <- sort(unique(standard_metadata$category))
+checkboxGroupInput('tech_cats', 'Select Strategies:', choices = cats, selected = cats)
+```
+
+Row
+-----------------------------------------------------------------------
+### Mean Reversion & Exhaustion Quadrant (Sigma vs 10MA Stretch)
+
+```{r}
+filtered_tech <- reactive({
+  unified_mom_df %>% filter(category %in% input$tech_cats)
+})
+
+renderPlot({
+  plot_technical_exhaustion_quadrant(filtered_tech())
+})
+```
+
+Row {data-height=350}
+-----------------------------------------------------------------------
+### Technical Pulse: Momentum Clusters & Action Signals
+
+```{r}
+renderTable({
+  filtered_tech() %>% 
+    select(ticker, momentum_cluster, action_signal, dist_10, dist_50, dist_200, trend_regime) %>% 
+    mutate(
+      `10d dist` = scales::percent(dist_10, accuracy = 0.1),
+      `50d dist` = scales::percent(dist_50, accuracy = 0.1),
+      `200d dist` = scales::percent(dist_200, accuracy = 0.1)
+    ) %>%
+    select(ticker, momentum_cluster, action_signal, `10d dist`, `50d dist`, `200d dist`, trend_regime) %>%
+    rename(Ticker = ticker, Cluster = momentum_cluster, Action = action_signal, Regime = trend_regime)
+})
+```
+
+Momentum Quadrant (Z)
+=====================================
+
+Sidebar {.sidebar}
+-----------------------------------------------------------------------
+### Statistical Filters
+
+```{r}
+checkboxGroupInput('quad_cats', 'Select Strategies:', choices = cats, selected = cats)
+```
+
+Row
+-----------------------------------------------------------------------
+### Interactive Momentum Developing Quadrant (Z-Scores)
+
+```{r}
+filtered_mom <- reactive({
+  unified_mom_df %>% filter(category %in% input$quad_cats)
+})
+
+renderPlot({
+  plot_nominal_quadrant(filtered_mom())
+})
+```
+
+Row {data-height=250}
+-----------------------------------------------------------------------
+### Data Pulse (Z-Scores)
+
+```{r}
+renderTable({
+  filtered_mom() %>% 
+    select(ticker, category, z_ytd, z_score) %>% 
+    arrange(desc(z_ytd)) %>%
+    rename(Ticker = ticker, Strategy = category, 'Z (YTD)' = z_ytd, 'Z (Daily)' = z_score)
+})
+```
