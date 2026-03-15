@@ -34,8 +34,7 @@ library(lubridate)
 REGIME_PAL <- c(
   Fall          = "#D90429",   # red
   Recovery      = "#F77F00",   # orange
-  Cruise        = "#2D6A4F",   # dark green
-  Consolidation = "#457B9D"    # steel blue
+  Consolidation = "#2D6A4F"    # dark green
 )
 
 # ==============================================================================
@@ -94,21 +93,12 @@ build_regime_table <- function(xts_ret_col,
   gaps <- tibble(xmin = gap_starts, xmax = gap_ends) %>%
     filter(xmax > xmin)
 
-  # ── Step 4: Classify each gap as Cruise or Consolidation ─────────────────
-  #   Compute max running drawdown within the gap window.
-  #   If max drawdown stays < t_cruise → Cruise; otherwise → Consolidation.
+  # ── Step 4: All gap periods are Consolidation ────────────────────────────
   gap_rows <- map_dfr(seq_len(nrow(gaps)), function(i) {
     g      <- gaps[i, ]
     window <- xts_ret_col[paste0(g$xmin, "/", g$xmax)]
     if (length(window) == 0) return(NULL)
-
-    # Running drawdown within this window
-    px      <- cumprod(1 + as.numeric(window))
-    run_max <- cummax(px)
-    max_dd  <- min((px - run_max) / run_max, na.rm = TRUE)   # most negative value
-
-    regime <- if (abs(max_dd) < t_cruise) "Cruise" else "Consolidation"
-    tibble(regime = regime, xmin = g$xmin, xmax = g$xmax)
+    tibble(regime = "Consolidation", xmin = g$xmin, xmax = g$xmax)
   })
 
   # ── Step 5: Combine, sort, compute period stats ───────────────────────────
@@ -244,14 +234,14 @@ plot_regime_overlay <- function(xts_ret_col,
   # ── Build plot ─────────────────────────────────────────────────────────────
   p <- ggplot() +
 
-    # Background shading: Cruise = very light green, Consolidation = very light blue
+    # Background shading for Consolidation periods
     geom_rect(
-      data = rt %>% filter(regime %in% c("Cruise", "Consolidation")),
+      data = rt %>% filter(regime == "Consolidation"),
       aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = regime),
       alpha = 0.06, inherit.aes = FALSE
     ) +
     scale_fill_manual(
-      values = c(Cruise = "#2D6A4F", Consolidation = "#457B9D"),
+      values = c(Consolidation = "#2D6A4F"),
       guide  = "none"
     ) +
 
@@ -400,8 +390,8 @@ plot_regime_overlay <- function(xts_ret_col,
     labs(
       title    = paste(asset_name, "— Drawdown Regime Chart"),
       subtitle = sprintf(
-        "Fall threshold: ≥%.0f%%  |  Cruise threshold: <%.0f%%  |  Regimes: Fall / Recovery / Consolidation / Cruise",
-        t_fall * 100, t_cruise * 100
+        "Fall threshold: ≥%.0f%%  |  Regimes: Fall / Recovery / Consolidation",
+        t_fall * 100
       )
     )
 

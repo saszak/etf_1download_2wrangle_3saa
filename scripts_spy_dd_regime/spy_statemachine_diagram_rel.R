@@ -72,13 +72,11 @@ if (!exists(".period_ret"))
 # ==============================================================================
 # 1. plot_sm_diagram()
 # ==============================================================================
-# Diamond layout:
+# Triangle layout — 3 states only:
 #
-#              [ CRUISE ]          ← top
-#             ↗           ↘
-#   [RECOVERY]             [CONSOLIDATION]
-#             ↖           ↙
-#              [ FALL   ]          ← bottom
+#            [CONSOLIDATION]       ← top
+#           ↗               ↘
+#     [FALL]  ─────────────  [RECOVERY]
 #
 # Each node   : regime name, N periods, avg duration, avg return, % time
 # Each arrow  : transition condition (threshold rule) + empirical p=XX% (n=Y)
@@ -101,18 +99,17 @@ plot_sm_diagram <- function(xts_ret,
                             format(min(index(master_r)), "%b %Y"),
                             format(max(index(master_r)), "%b %Y"))
 
-  p_fall_lbl   <- percent(t_fall,   accuracy = 1)
-  p_cruise_lbl <- percent(t_cruise, accuracy = 1)
+  p_fall_lbl <- percent(t_fall, accuracy = 1)
 
-  # ── Node positions: diamond ───────────────────────────────────────────────
+  # ── Node positions: triangle ─────────────────────────────────────────────
   node_pos <- tibble(
-    regime = c("Fall", "Recovery", "Cruise", "Consolidation"),
-    x      = c(2.5,    0.5,        2.5,      4.5),
-    y      = c(0.85,   2.75,       4.65,     2.75)
+    regime = c("Fall", "Recovery", "Consolidation"),
+    x      = c(1.0,    4.0,        2.5),
+    y      = c(1.0,    1.0,        3.8)
   )
 
-  # Guarantee all 4 regimes exist (even if none observed for a regime)
-  stats <- tibble(regime = c("Fall", "Recovery", "Cruise", "Consolidation")) %>%
+  # Guarantee all 3 regimes exist
+  stats <- tibble(regime = c("Fall", "Recovery", "Consolidation")) %>%
     left_join(stats, by = "regime") %>%
     replace_na(list(n_periods = 0, avg_days = 0, avg_ret = 0, pct_time = 0))
 
@@ -135,17 +132,13 @@ plot_sm_diagram <- function(xts_ret,
       )
     )
 
-  # ── Edge definitions ──────────────────────────────────────────────────────
-  # lx / ly = offsets applied to the edge midpoint for label placement
-  # curv    = ggplot2 geom_curve curvature (negative = left arc, positive = right arc)
+  # ── Edge definitions — 3-edge cycle ──────────────────────────────────────
+  # lx / ly = offset from edge midpoint for label placement
   edge_def <- tribble(
-    ~from,           ~to,             ~condition,                                          ~curv,  ~lx,   ~ly,
-    "Fall",          "Recovery",      "Trough reached",                                    -0.35,  -0.60,  0.10,
-    "Recovery",      "Cruise",        paste0("DD < ", p_cruise_lbl),                       -0.35,  -0.52,  0.28,
-    "Recovery",      "Consolidation", paste0(p_cruise_lbl, " ≤ DD < ", p_fall_lbl),         0.00,   0.00,  0.52,
-    "Consolidation", "Fall",          paste0("DD ≥ ", p_fall_lbl),                         -0.35,   0.60,  0.10,
-    "Cruise",        "Consolidation", paste0("DD crosses ", p_cruise_lbl, "↑"),             0.35,   0.52, -0.25,
-    "Consolidation", "Cruise",        "Full recovery",                                     -0.35,   0.00, -0.52
+    ~from,           ~to,               ~condition,               ~curv,  ~lx,   ~ly,
+    "Fall",          "Recovery",        "Trough reached",         -0.20,   0.00, -0.45,
+    "Recovery",      "Consolidation",   "Recovery complete",      -0.30,   0.65,  0.20,
+    "Consolidation", "Fall",            paste0("DD ≥ ", p_fall_lbl), -0.30, -0.65,  0.20
   ) %>%
     left_join(node_pos %>% rename(from = regime, x0 = x, y0 = y), by = "from") %>%
     left_join(node_pos %>% rename(to   = regime, x1 = x, y1 = y), by = "to") %>%
@@ -160,14 +153,13 @@ plot_sm_diagram <- function(xts_ret,
         sprintf("p=%.0f%%  (n=%d)", prob * 100, n_obs),
         NA_character_
       ),
-      # Nudge probability label further from condition label along the same offset
-      px_abs = mid_x + lx * 0.50,
-      py_abs = mid_y + ly * 0.50
+      px_abs = mid_x + lx * 0.45,
+      py_abs = mid_y + ly * 0.45
     )
 
   # ── Build plot — one geom_curve per edge (scalar curvature required) ───────
   p <- ggplot() +
-    coord_cartesian(xlim = c(-1.3, 6.3), ylim = c(-0.6, 6.3)) +
+    coord_cartesian(xlim = c(-0.8, 5.8), ylim = c(-0.5, 5.2)) +
     theme_void(base_size = 11) +
     theme(plot.margin = margin(8, 8, 8, 8))
 
@@ -177,9 +169,9 @@ plot_sm_diagram <- function(xts_ret,
       data       = e,
       aes(x = x0, y = y0, xend = x1, yend = y1),
       curvature  = e$curv,
-      arrow      = arrow(length = unit(0.11, "in"), type = "closed"),
+      arrow      = arrow(length = unit(0.13, "in"), type = "closed"),
       color      = "grey42",
-      linewidth  = 0.65,
+      linewidth  = 0.70,
       show.legend = FALSE
     )
   }
@@ -190,11 +182,11 @@ plot_sm_diagram <- function(xts_ret,
     geom_label(
       data          = edge_def,
       aes(x = lx_abs, y = ly_abs, label = condition),
-      size          = 2.45,
+      size          = 2.6,
       color         = "grey28",
       fill          = "white",
       label.size    = 0.25,
-      label.padding = unit(0.18, "lines"),
+      label.padding = unit(0.20, "lines"),
       fontface      = "italic",
       show.legend   = FALSE
     ) +
@@ -203,45 +195,45 @@ plot_sm_diagram <- function(xts_ret,
     geom_text(
       data        = edge_def %>% filter(!is.na(prob_label)),
       aes(x = px_abs, y = py_abs, label = prob_label),
-      size        = 2.15,
+      size        = 2.2,
       color       = "grey55",
       fontface    = "bold",
       show.legend = FALSE
     ) +
 
-    # Active-node outer glow ring (wide semi-transparent label behind main label)
+    # Active-node outer glow ring
     geom_label(
       data = nodes %>% filter(is_active),
       aes(x = x, y = y, label = node_text, fill = color),
       color         = "white",
-      size          = 3.3,
+      size          = 3.4,
       fontface      = "bold",
       alpha         = 0.22,
       label.size    = 3.2,
-      label.padding = unit(0.68, "lines"),
+      label.padding = unit(0.72, "lines"),
       label.r       = unit(0.50, "lines"),
       show.legend   = FALSE
     ) +
 
-    # Node labels (all 4 regimes)
+    # Node labels (all 3 regimes)
     geom_label(
       data = nodes,
       aes(x = x, y = y, label = node_text, fill = color),
       color         = "white",
-      size          = 3.1,
+      size          = 3.2,
       fontface      = "bold",
       label.size    = 0.65,
-      label.padding = unit(0.58, "lines"),
-      label.r       = unit(0.42, "lines"),
+      label.padding = unit(0.62, "lines"),
+      label.r       = unit(0.44, "lines"),
       show.legend   = FALSE
     ) +
     scale_fill_identity() +
 
     # Title bar
     annotate(
-      "text", x = 2.5, y = 5.95,
-      label   = sprintf("%s  Regime State Machine   |   Fall ≥%s   Cruise <%s   |   %s",
-                        master, p_fall_lbl, p_cruise_lbl, date_range),
+      "text", x = 2.5, y = 4.95,
+      label   = sprintf("%s  Regime State Machine   |   Fall ≥%s   |   %s",
+                        master, p_fall_lbl, date_range),
       size     = 3.5,
       fontface = "bold",
       color    = "grey18",
@@ -251,7 +243,7 @@ plot_sm_diagram <- function(xts_ret,
     # Current-regime badge
     annotate(
       "label",
-      x = 2.5, y = 5.58,
+      x = 2.5, y = 4.62,
       label         = sprintf("NOW: %s  (since %s)", current_regime, current_since),
       size          = 3.0,
       fontface      = "bold",
@@ -317,7 +309,7 @@ plot_sm_alpha_heatmap <- function(xts_ret,
         sprintf("%s%.1f%%", if_else(avg_disp >= 0, "+", ""), avg_disp * 100)
       ),
       ticker    = factor(ticker, levels = rev(all_tkrs)),
-      regime    = factor(regime, levels = c("Fall", "Recovery", "Consolidation", "Cruise")),
+      regime    = factor(regime, levels = c("Fall", "Recovery", "Consolidation")),
       is_master = ticker == master,
       txt_color = if_else(abs(avg_disp) > 0.06, "white", "grey20")
     )
@@ -346,10 +338,9 @@ plot_sm_alpha_heatmap <- function(xts_ret,
     scale_color_identity() +
     scale_x_discrete(
       labels = c(
-        Fall          = paste0("FALL\n≥", percent(t_fall,   accuracy = 1)),
+        Fall          = paste0("FALL\n≥", percent(t_fall, accuracy = 1)),
         Recovery      = "RECOVERY",
-        Consolidation = "CONSOLIDATION",
-        Cruise        = paste0("CRUISE\n<", percent(t_cruise, accuracy = 1))
+        Consolidation = "CONSOLIDATION"
       )
     ) +
 
@@ -388,7 +379,7 @@ plot_sm_transition_matrix <- function(xts_ret,
   rt       <- build_regime_table(master_r, t_fall, t_cruise)
   trans    <- .sm_transitions(rt)
 
-  all_regimes <- c("Fall", "Recovery", "Consolidation", "Cruise")
+  all_regimes <- c("Fall", "Recovery", "Consolidation")
 
   # Full 4×4 grid — fill missing pairs with 0
   full_grid <- expand.grid(
@@ -440,7 +431,10 @@ plot_sm_transition_matrix <- function(xts_ret,
     theme(
       panel.grid   = element_blank(),
       axis.text    = element_text(face = "bold", size = 9.5, color = "grey22"),
-      axis.title   = element_blank(),
+      axis.title.x = element_text(face = "bold", size = 10, color = "grey30",
+                                   margin = margin(t = 4)),
+      axis.title.y = element_text(face = "bold", size = 10, color = "grey30",
+                                   margin = margin(r = 4)),
       legend.position = "right",
       plot.title   = element_text(face = "bold", size = 13),
       plot.subtitle = element_text(color = "grey50", size = 9)
@@ -448,11 +442,11 @@ plot_sm_transition_matrix <- function(xts_ret,
     labs(
       title    = sprintf("%s Regime Transition Matrix  (Empirical)", master),
       subtitle = sprintf(
-        "Based on %d observed regime periods  |  Row = From  |  Column = To  |  Diagonal = self-loop",
+        "Based on %d observed regime periods  |  Diagonal = self-loop  |  Missing cells = never observed",
         nrow(rt)
       ),
       x = "To →",
-      y = "From →"
+      y = "← From"
     )
 }
 

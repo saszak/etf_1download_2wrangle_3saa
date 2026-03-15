@@ -131,15 +131,15 @@ plot_regime_rel_overlay <- function(xts_ret,
 
     # Regime background shading
     geom_rect(
-      data = rt %>% filter(regime %in% c("Cruise", "Consolidation")),
+      data = rt %>% filter(regime == "Consolidation"),
       aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf,
           fill = as.character(regime)),
       alpha = 0.05, inherit.aes = FALSE
     ) +
     scale_fill_manual(
-      values = c(Cruise = "#2D6A4F", Consolidation = "#457B9D",
+      values = c(Consolidation = "#2D6A4F",
                  Fall = "#D90429", Recovery = "#F77F00"),
-      breaks = c("Fall", "Recovery", "Consolidation", "Cruise"),
+      breaks = c("Fall", "Recovery", "Consolidation"),
       name   = "Regime",
       guide  = guide_legend(override.aes = list(alpha = 0.9, size = 5))
     ) +

@@ -148,14 +148,14 @@ plot_regime_multi_overlay <- function(xts_ret,
   # ── Plot ───────────────────────────────────────────────────────────────────
   p <- ggplot() +
 
-    # Background shading for regime type
+    # Background shading for Consolidation periods
     geom_rect(
-      data = rt %>% filter(regime %in% c("Cruise", "Consolidation")),
+      data = rt %>% filter(regime == "Consolidation"),
       aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = as.character(regime)),
       alpha = 0.05, inherit.aes = FALSE
     ) +
     scale_fill_manual(
-      values = c(Cruise = "#2D6A4F", Consolidation = "#457B9D"),
+      values = c(Consolidation = "#2D6A4F"),
       guide  = "none"
     ) +
 
