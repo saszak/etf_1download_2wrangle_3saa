@@ -161,7 +161,7 @@ plot_sm_diagram <- function(xts_ret,
 
   # ── Build plot — one geom_curve per edge (scalar curvature required) ───────
   p <- ggplot() +
-    coord_cartesian(xlim = c(-0.8, 5.8), ylim = c(-0.5, 5.2)) +
+    coord_cartesian(xlim = c(-0.8, 5.8), ylim = c(-0.5, 6.0)) +
     theme_void(base_size = 11) +
     theme(plot.margin = margin(8, 8, 8, 8))
 
@@ -171,24 +171,24 @@ plot_sm_diagram <- function(xts_ret,
       data       = e,
       aes(x = x0, y = y0, xend = x1, yend = y1),
       curvature  = e$curv,
-      arrow      = arrow(length = unit(0.13, "in"), type = "closed"),
-      color      = "grey42",
-      linewidth  = 0.70,
+      arrow      = arrow(length = unit(0.09, "in"), type = "closed"),
+      color      = "grey55",
+      linewidth  = 0.45,
       show.legend = FALSE
     )
   }
 
   p <- p +
 
-    # Condition labels on arrows
+    # Condition labels on arrows — smaller to yield space to nodes
     geom_label(
       data          = edge_def,
       aes(x = lx_abs, y = ly_abs, label = condition),
-      size          = 2.6,
-      color         = "grey28",
+      size          = 1.9,
+      color         = "grey40",
       fill          = "white",
-      label.size    = 0.25,
-      label.padding = unit(0.20, "lines"),
+      label.size    = 0.15,
+      label.padding = unit(0.12, "lines"),
       fontface      = "italic",
       show.legend   = FALSE
     ) +
@@ -197,8 +197,8 @@ plot_sm_diagram <- function(xts_ret,
     geom_text(
       data        = edge_def %>% filter(!is.na(prob_label)),
       aes(x = px_abs, y = py_abs, label = prob_label),
-      size        = 2.2,
-      color       = "grey55",
+      size        = 1.7,
+      color       = "grey60",
       fontface    = "bold",
       show.legend = FALSE
     ) +
@@ -208,32 +208,32 @@ plot_sm_diagram <- function(xts_ret,
       data = nodes %>% filter(is_active),
       aes(x = x, y = y, label = node_text, fill = color),
       color         = "white",
-      size          = 3.4,
+      size          = 5.8,
       fontface      = "bold",
       alpha         = 0.22,
       label.size    = 3.2,
-      label.padding = unit(0.72, "lines"),
-      label.r       = unit(0.50, "lines"),
+      label.padding = unit(1.40, "lines"),
+      label.r       = unit(0.65, "lines"),
       show.legend   = FALSE
     ) +
 
-    # Node labels (all 3 regimes)
+    # Node labels (all 3 regimes) — doubled size
     geom_label(
       data = nodes,
       aes(x = x, y = y, label = node_text, fill = color),
       color         = "white",
-      size          = 3.2,
+      size          = 5.5,
       fontface      = "bold",
       label.size    = 0.65,
-      label.padding = unit(0.62, "lines"),
-      label.r       = unit(0.44, "lines"),
+      label.padding = unit(1.30, "lines"),
+      label.r       = unit(0.60, "lines"),
       show.legend   = FALSE
     ) +
     scale_fill_identity() +
 
     # Title bar
     annotate(
-      "text", x = 2.5, y = 4.95,
+      "text", x = 2.5, y = 5.60,
       label   = sprintf("%s  Regime State Machine   |   Fall ≥%s   |   %s",
                         master, p_fall_lbl, date_range),
       size     = 3.5,
@@ -245,7 +245,7 @@ plot_sm_diagram <- function(xts_ret,
     # Current-regime badge
     annotate(
       "label",
-      x = 2.5, y = 4.62,
+      x = 2.5, y = 5.28,
       label         = sprintf("NOW: %s  (since %s)", current_regime, current_since),
       size          = 3.0,
       fontface      = "bold",
@@ -372,7 +372,7 @@ plot_sm_diagram_perf <- function(xts_ret,
   max_bw   <- 0.68    # max half-width in diagram coords (normalised to max_abs)
   bar_h_p  <- 0.115   # individual bar height
   bar_gap  <- 0.022   # gap between bars
-  top_off  <- 0.48    # distance from node centre y to first bar top edge
+  top_off  <- 0.75    # distance from node centre y to first bar top edge (increased for larger nodes)
   n_tkrs   <- length(all_tkrs)
 
   perf_bars <- avg_df %>%
@@ -409,29 +409,29 @@ plot_sm_diagram_perf <- function(xts_ret,
 
   # ── Build plot ────────────────────────────────────────────────────────────
   p <- ggplot() +
-    coord_cartesian(xlim = c(-0.8, 5.8), ylim = c(-1.3, 5.2)) +
+    coord_cartesian(xlim = c(-0.8, 5.8), ylim = c(-1.6, 6.0)) +
     theme_void(base_size = 11) +
     theme(plot.margin = margin(8, 8, 8, 8))
 
-  # Edges
+  # Edges — thinner to yield visual weight to nodes
   for (i in seq_len(nrow(edge_def))) {
     e <- edge_def[i, ]
     p <- p + geom_curve(
       data = e, aes(x = x0, y = y0, xend = x1, yend = y1),
       curvature  = e$curv,
-      arrow      = arrow(length = unit(0.13, "in"), type = "closed"),
-      color      = "grey42", linewidth = 0.70, show.legend = FALSE
+      arrow      = arrow(length = unit(0.09, "in"), type = "closed"),
+      color      = "grey55", linewidth = 0.45, show.legend = FALSE
     )
   }
 
   p <- p +
 
-    # Condition labels on edges
+    # Condition labels on edges — smaller to yield space to nodes
     geom_label(
       data = edge_def,
       aes(x = lx_abs, y = ly_abs, label = condition),
-      size = 2.6, color = "grey28", fill = "white",
-      label.size = 0.25, label.padding = unit(0.20, "lines"),
+      size = 1.9, color = "grey40", fill = "white",
+      label.size = 0.15, label.padding = unit(0.12, "lines"),
       fontface = "italic", show.legend = FALSE
     ) +
 
@@ -439,7 +439,7 @@ plot_sm_diagram_perf <- function(xts_ret,
     geom_text(
       data = edge_def %>% filter(!is.na(prob_label)),
       aes(x = px_abs, y = py_abs, label = prob_label),
-      size = 2.2, color = "grey55", fontface = "bold", show.legend = FALSE
+      size = 1.7, color = "grey60", fontface = "bold", show.legend = FALSE
     ) +
 
     # Zero-line (vertical reference) under each node
@@ -475,28 +475,28 @@ plot_sm_diagram_perf <- function(xts_ret,
     ) +
     scale_color_identity() +
 
-    # Active-node outer glow
+    # Active-node outer glow — doubled size
     geom_label(
       data = nodes %>% filter(is_active),
       aes(x = x, y = y, label = node_text, fill = color),
-      color = "white", size = 3.4, fontface = "bold", alpha = 0.22,
-      label.size = 3.2, label.padding = unit(0.72, "lines"),
-      label.r = unit(0.50, "lines"), show.legend = FALSE
+      color = "white", size = 5.8, fontface = "bold", alpha = 0.22,
+      label.size = 3.2, label.padding = unit(1.40, "lines"),
+      label.r = unit(0.65, "lines"), show.legend = FALSE
     ) +
 
-    # Node labels
+    # Node labels — doubled size
     geom_label(
       data = nodes,
       aes(x = x, y = y, label = node_text, fill = color),
-      color = "white", size = 3.2, fontface = "bold",
-      label.size = 0.65, label.padding = unit(0.62, "lines"),
-      label.r = unit(0.44, "lines"), show.legend = FALSE
+      color = "white", size = 5.5, fontface = "bold",
+      label.size = 0.65, label.padding = unit(1.30, "lines"),
+      label.r = unit(0.60, "lines"), show.legend = FALSE
     ) +
     scale_fill_identity() +
 
     # Title
     annotate(
-      "text", x = 2.5, y = 4.95,
+      "text", x = 2.5, y = 5.60,
       label = sprintf(
         "%s  Regime State Machine  +  Relative Performance   |   Fall ≥%s   |   %s",
         master, p_fall_lbl, date_range),
@@ -505,7 +505,7 @@ plot_sm_diagram_perf <- function(xts_ret,
 
     # Legend note
     annotate(
-      "text", x = 2.5, y = 4.65,
+      "text", x = 2.5, y = 5.30,
       label = sprintf(
         "%s bar = abs return [navy]  |  Others = α vs %s  [green +, red −]  |  Width ∝ magnitude",
         master, master),
@@ -514,7 +514,7 @@ plot_sm_diagram_perf <- function(xts_ret,
 
     # Current-regime badge
     annotate(
-      "label", x = 2.5, y = 4.37,
+      "label", x = 2.5, y = 5.02,
       label = sprintf("NOW: %s  (since %s)", current_regime, current_since),
       size = 2.9, fontface = "bold",
       color = REGIME_PAL[current_regime],
