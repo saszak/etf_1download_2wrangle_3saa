@@ -261,6 +261,272 @@ plot_sm_diagram <- function(xts_ret,
 
 
 # ==============================================================================
+# 1b. plot_sm_diagram_perf()
+# ==============================================================================
+# Same 3-node triangle as plot_sm_diagram() PLUS a performance panel below
+# each node — one horizontal bar per ticker:
+#   Master (SPY)  : absolute avg return           [navy]
+#   All others    : avg alpha vs SPY              [green = positive, red = negative]
+# Bar WIDTH is proportional to performance magnitude (normalised across all
+# regime × ticker combinations so bars are visually comparable).
+# ==============================================================================
+
+plot_sm_diagram_perf <- function(xts_ret,
+                                  tickers,
+                                  master   = "SPY",
+                                  t_fall   = 0.10,
+                                  t_cruise = 0.05) {
+
+  missing_tk <- setdiff(c(master, tickers), colnames(xts_ret))
+  if (length(missing_tk) > 0)
+    stop("Tickers not in xts_ret: ", paste(missing_tk, collapse = ", "))
+
+  master_r <- xts_ret[, master]
+  rt       <- build_regime_table(master_r, t_fall, t_cruise)
+  stats    <- .sm_stats(rt)
+  trans    <- .sm_transitions(rt)
+
+  current_regime <- as.character(tail(rt$regime, 1))
+  current_since  <- format(tail(rt$xmin, 1), "%d %b %Y")
+  date_range     <- sprintf("%s – %s",
+                            format(min(index(master_r)), "%b %Y"),
+                            format(max(index(master_r)), "%b %Y"))
+  p_fall_lbl <- percent(t_fall, accuracy = 1)
+
+  # ── Node layout (identical to plot_sm_diagram) ────────────────────────────
+  node_pos <- tibble(
+    regime = c("Fall", "Recovery", "Consolidation"),
+    x      = c(1.0,    4.0,        2.5),
+    y      = c(1.0,    1.0,        3.8)
+  )
+
+  stats <- tibble(regime = c("Fall", "Recovery", "Consolidation")) %>%
+    left_join(stats, by = "regime") %>%
+    replace_na(list(n_periods = 0, avg_days = 0, avg_ret = 0,
+                    avg_ann_ret = 0, pct_time = 0))
+
+  nodes <- stats %>%
+    left_join(node_pos, by = "regime") %>%
+    mutate(
+      color     = REGIME_PAL[regime],
+      is_active = regime == current_regime,
+      node_text = if_else(
+        n_periods == 0,
+        sprintf("%s\n(not observed)", toupper(regime)),
+        sprintf(
+          "%s%s\nN=%d · avg %d days\nAvg: %s  Speed: %s/yr\n%s of time",
+          if_else(is_active, "▶ ", ""),
+          toupper(regime),
+          n_periods, avg_days,
+          percent(avg_ret,     accuracy = 0.1),
+          percent(avg_ann_ret, accuracy = 0.1),
+          percent(pct_time,    accuracy = 0.1)
+        )
+      )
+    )
+
+  # ── Edges (same 3-edge cycle) ─────────────────────────────────────────────
+  edge_def <- tribble(
+    ~from,           ~to,               ~condition,                  ~curv,  ~lx,   ~ly,
+    "Fall",          "Recovery",        "Trough reached",            -0.20,   0.00, -0.45,
+    "Recovery",      "Consolidation",   "Recovery complete",         -0.30,   0.65,  0.20,
+    "Consolidation", "Fall",            paste0("DD ≥ ", p_fall_lbl), -0.30,  -0.65,  0.20
+  ) %>%
+    left_join(node_pos %>% rename(from = regime, x0 = x, y0 = y), by = "from") %>%
+    left_join(node_pos %>% rename(to   = regime, x1 = x, y1 = y), by = "to") %>%
+    left_join(trans %>% select(from, to, n_obs, prob), by = c("from", "to")) %>%
+    mutate(
+      mid_x      = (x0 + x1) / 2,
+      mid_y      = (y0 + y1) / 2,
+      lx_abs     = mid_x + lx,
+      ly_abs     = mid_y + ly,
+      prob_label = if_else(!is.na(prob),
+                           sprintf("p=%.0f%%  (n=%d)", prob * 100, n_obs),
+                           NA_character_),
+      px_abs = mid_x + lx * 0.45,
+      py_abs = mid_y + ly * 0.45
+    )
+
+  # ── Per-ticker avg alpha per regime ──────────────────────────────────────
+  all_tkrs <- c(master, tickers)
+
+  avg_df <- map_dfr(all_tkrs, function(tk) {
+    tk_r <- xts_ret[, tk]
+    rt %>%
+      rowwise() %>%
+      mutate(
+        ticker   = tk,
+        raw_ret  = .period_ret(tk_r, xmin, xmax),
+        spy_ret  = period_return,
+        disp_ret = .disp_ret_sm(tk, raw_ret, spy_ret, master)
+      ) %>%
+      ungroup() %>%
+      select(ticker, regime, disp_ret)
+  }) %>%
+    mutate(regime = as.character(regime)) %>%
+    group_by(ticker, regime) %>%
+    summarise(avg_disp = mean(disp_ret, na.rm = TRUE), .groups = "drop")
+
+  # ── Bar layout parameters ─────────────────────────────────────────────────
+  max_abs  <- max(abs(avg_df$avg_disp), na.rm = TRUE)
+  max_bw   <- 0.68    # max half-width in diagram coords (normalised to max_abs)
+  bar_h_p  <- 0.115   # individual bar height
+  bar_gap  <- 0.022   # gap between bars
+  top_off  <- 0.48    # distance from node centre y to first bar top edge
+  n_tkrs   <- length(all_tkrs)
+
+  perf_bars <- avg_df %>%
+    left_join(node_pos, by = "regime") %>%
+    mutate(
+      j         = match(ticker, all_tkrs),
+      bar_cy    = y - top_off - (j - 1) * (bar_h_p + bar_gap) - bar_h_p / 2,
+      bar_ymin  = bar_cy - bar_h_p / 2,
+      bar_ymax  = bar_cy + bar_h_p / 2,
+      bar_w     = avg_disp / max_abs * max_bw,
+      bar_xmin  = if_else(avg_disp >= 0, x,           x + bar_w),
+      bar_xmax  = if_else(avg_disp >= 0, x + bar_w,   x),
+      fill_col  = case_when(
+        ticker == master ~ "#1D3557",
+        avg_disp >= 0   ~ "#2D6A4F",
+        TRUE            ~ "#D90429"
+      ),
+      val_label = if_else(
+        ticker == master,
+        percent(avg_disp, accuracy = 0.1),
+        sprintf("%s%.1f%%", if_else(avg_disp >= 0, "+", ""), avg_disp * 100)
+      ),
+      txt_x     = if_else(avg_disp >= 0, bar_xmax + 0.04, bar_xmin - 0.04),
+      txt_hjust = if_else(avg_disp >= 0, 0, 1),
+      lbl_x     = x - max_bw - 0.18    # fixed left anchor for ticker name
+    )
+
+  # Vertical zero-line extent under each node
+  zero_segs <- node_pos %>%
+    mutate(
+      yz_top = y - top_off + 0.03,
+      yz_bot = y - top_off - n_tkrs * (bar_h_p + bar_gap)
+    )
+
+  # ── Build plot ────────────────────────────────────────────────────────────
+  p <- ggplot() +
+    coord_cartesian(xlim = c(-0.8, 5.8), ylim = c(-1.3, 5.2)) +
+    theme_void(base_size = 11) +
+    theme(plot.margin = margin(8, 8, 8, 8))
+
+  # Edges
+  for (i in seq_len(nrow(edge_def))) {
+    e <- edge_def[i, ]
+    p <- p + geom_curve(
+      data = e, aes(x = x0, y = y0, xend = x1, yend = y1),
+      curvature  = e$curv,
+      arrow      = arrow(length = unit(0.13, "in"), type = "closed"),
+      color      = "grey42", linewidth = 0.70, show.legend = FALSE
+    )
+  }
+
+  p <- p +
+
+    # Condition labels on edges
+    geom_label(
+      data = edge_def,
+      aes(x = lx_abs, y = ly_abs, label = condition),
+      size = 2.6, color = "grey28", fill = "white",
+      label.size = 0.25, label.padding = unit(0.20, "lines"),
+      fontface = "italic", show.legend = FALSE
+    ) +
+
+    # Empirical transition probability labels
+    geom_text(
+      data = edge_def %>% filter(!is.na(prob_label)),
+      aes(x = px_abs, y = py_abs, label = prob_label),
+      size = 2.2, color = "grey55", fontface = "bold", show.legend = FALSE
+    ) +
+
+    # Zero-line (vertical reference) under each node
+    geom_segment(
+      data = zero_segs,
+      aes(x = x, xend = x, y = yz_top, yend = yz_bot),
+      color = "grey62", linewidth = 0.38, show.legend = FALSE
+    ) +
+
+    # Performance bars
+    geom_rect(
+      data = perf_bars,
+      aes(xmin = bar_xmin, xmax = bar_xmax,
+          ymin = bar_ymin,  ymax = bar_ymax,
+          fill = fill_col),
+      color = "white", linewidth = 0.12, show.legend = FALSE
+    ) +
+
+    # Ticker name labels (left of zero line, fixed anchor)
+    geom_text(
+      data = perf_bars,
+      aes(x = lbl_x, y = bar_cy, label = ticker),
+      hjust = 1, size = 2.25, fontface = "bold", color = "grey30",
+      show.legend = FALSE
+    ) +
+
+    # Performance value labels (outside bar end, coloured to match bar)
+    geom_text(
+      data = perf_bars,
+      aes(x = txt_x, y = bar_cy, label = val_label,
+          hjust = txt_hjust, color = fill_col),
+      size = 2.0, fontface = "bold", show.legend = FALSE
+    ) +
+    scale_color_identity() +
+
+    # Active-node outer glow
+    geom_label(
+      data = nodes %>% filter(is_active),
+      aes(x = x, y = y, label = node_text, fill = color),
+      color = "white", size = 3.4, fontface = "bold", alpha = 0.22,
+      label.size = 3.2, label.padding = unit(0.72, "lines"),
+      label.r = unit(0.50, "lines"), show.legend = FALSE
+    ) +
+
+    # Node labels
+    geom_label(
+      data = nodes,
+      aes(x = x, y = y, label = node_text, fill = color),
+      color = "white", size = 3.2, fontface = "bold",
+      label.size = 0.65, label.padding = unit(0.62, "lines"),
+      label.r = unit(0.44, "lines"), show.legend = FALSE
+    ) +
+    scale_fill_identity() +
+
+    # Title
+    annotate(
+      "text", x = 2.5, y = 4.95,
+      label = sprintf(
+        "%s  Regime State Machine  +  Relative Performance   |   Fall ≥%s   |   %s",
+        master, p_fall_lbl, date_range),
+      size = 3.4, fontface = "bold", color = "grey18", hjust = 0.5
+    ) +
+
+    # Legend note
+    annotate(
+      "text", x = 2.5, y = 4.65,
+      label = sprintf(
+        "%s bar = abs return [navy]  |  Others = α vs %s  [green +, red −]  |  Width ∝ magnitude",
+        master, master),
+      size = 2.6, fontface = "italic", color = "grey45", hjust = 0.5
+    ) +
+
+    # Current-regime badge
+    annotate(
+      "label", x = 2.5, y = 4.37,
+      label = sprintf("NOW: %s  (since %s)", current_regime, current_since),
+      size = 2.9, fontface = "bold",
+      color = REGIME_PAL[current_regime],
+      fill = "white", label.size = 0.5,
+      label.padding = unit(0.25, "lines"), hjust = 0.5
+    )
+
+  p
+}
+
+
+# ==============================================================================
 # 2. plot_sm_alpha_heatmap()
 # ==============================================================================
 # Ticker × Regime TYPE avg return heatmap (relative mode):
@@ -477,12 +743,14 @@ run_sm_diagram_rel <- function(xts_ret,
   cat("─────────────────────────────────────────────────────────────────────\n")
 
   p1 <- plot_sm_diagram(xts_ret, master, t_fall, t_cruise)
-  p2 <- plot_sm_alpha_heatmap(xts_ret, tickers, master, t_fall, t_cruise)
-  p3 <- plot_sm_transition_matrix(xts_ret, master, t_fall, t_cruise)
+  p2 <- plot_sm_diagram_perf(xts_ret, tickers, master, t_fall, t_cruise)
+  p3 <- plot_sm_alpha_heatmap(xts_ret, tickers, master, t_fall, t_cruise)
+  p4 <- plot_sm_transition_matrix(xts_ret, master, t_fall, t_cruise)
 
   print(p1)
   print(p2)
   print(p3)
+  print(p4)
 
   invisible(rt)
 }
