@@ -216,6 +216,12 @@ plot_regime_overlay <- function(xts_ret_col,
   current_since  <- format(tail(rt$xmin, 1), "%d %b %Y")
   current_label  <- sprintf("NOW: %s (since %s)", current_regime, current_since)
 
+  # ── Transition arrows: each boundary coloured by the incoming regime ───────
+  trans_arrows <- rt %>%
+    arrange(xmin) %>%
+    mutate(next_color = lead(as.character(color))) %>%
+    filter(!is.na(next_color))
+
   # ── Overlay bar data ───────────────────────────────────────────────────────
   if (!is.null(overlay_ret)) {
     stopifnot(is.xts(overlay_ret), ncol(overlay_ret) == 1)
@@ -297,6 +303,15 @@ plot_regime_overlay <- function(xts_ret_col,
           y = y_row1 + bar_h + total_range * 0.03,
           label = label, color = color),
       angle = 45, hjust = 0, size = label_size * 0.85, fontface = "bold",
+      show.legend = FALSE
+    ) +
+
+    # Transition arrows: ▶ at each regime boundary, coloured by next state
+    geom_text(
+      data = trans_arrows,
+      aes(x = xmax, y = y_row1 + bar_h / 2,
+          label = "▶", color = next_color),
+      size = 3.2, hjust = 0.5, fontface = "bold",
       show.legend = FALSE
     ) +
     scale_color_identity() +

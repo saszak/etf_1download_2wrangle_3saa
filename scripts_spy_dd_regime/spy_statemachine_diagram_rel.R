@@ -42,11 +42,12 @@ if (!exists(".period_ret"))
     mutate(regime = as.character(regime)) %>%
     group_by(regime) %>%
     summarise(
-      n_periods = n(),
-      avg_days  = round(mean(days,          na.rm = TRUE)),
-      avg_ret   = mean(period_return,       na.rm = TRUE),
-      pct_time  = sum(days, na.rm = TRUE) / total_days,
-      .groups   = "drop"
+      n_periods   = n(),
+      avg_days    = round(mean(days,         na.rm = TRUE)),
+      avg_ret     = mean(period_return,      na.rm = TRUE),
+      avg_ann_ret = mean(ann_return,         na.rm = TRUE),
+      pct_time    = sum(days, na.rm = TRUE) / total_days,
+      .groups     = "drop"
     )
 }
 
@@ -111,7 +112,7 @@ plot_sm_diagram <- function(xts_ret,
   # Guarantee all 3 regimes exist
   stats <- tibble(regime = c("Fall", "Recovery", "Consolidation")) %>%
     left_join(stats, by = "regime") %>%
-    replace_na(list(n_periods = 0, avg_days = 0, avg_ret = 0, pct_time = 0))
+    replace_na(list(n_periods = 0, avg_days = 0, avg_ret = 0, avg_ann_ret = 0, pct_time = 0))
 
   nodes <- stats %>%
     left_join(node_pos, by = "regime") %>%
@@ -122,12 +123,13 @@ plot_sm_diagram <- function(xts_ret,
         n_periods == 0,
         sprintf("%s\n(not observed)", toupper(regime)),
         sprintf(
-          "%s%s\nN=%d · avg %d days\nAvg: %s · %s of time",
+          "%s%s\nN=%d · avg %d days\nAvg: %s  Speed: %s/yr\n%s of time",
           if_else(is_active, "▶ ", ""),
           toupper(regime),
           n_periods, avg_days,
-          percent(avg_ret, accuracy = 0.1),
-          percent(pct_time, accuracy = 0.1)
+          percent(avg_ret,     accuracy = 0.1),
+          percent(avg_ann_ret, accuracy = 0.1),
+          percent(pct_time,    accuracy = 0.1)
         )
       )
     )
