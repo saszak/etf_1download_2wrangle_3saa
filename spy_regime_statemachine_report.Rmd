@@ -1,6 +1,9 @@
 ---
 title: "SPY Drawdown Regime & State Machine — Methodology and Results"
 output:
+  pdf_document:
+    toc: true
+    latex_engine: xelatex
   html_document:
     toc: true
     toc_float: true
@@ -159,7 +162,7 @@ plot_regime_calendar(spy_ret, asset_name = "SPY")
 *N periods · avg duration · avg return · **speed** (annualised return) · % of time*.
 Each edge shows the transition rule and empirical probability (`p = XX%`).
 
-```{r x4, fig.height=7, fig.width=11}
+```{r x4, fig.height=12, fig.width=16}
 plot_sm_diagram(xts_ret, master = "SPY", t_fall = 0.10)
 ```
 
@@ -171,7 +174,7 @@ each node. One horizontal bar per ticker:
 - **SPY** (navy): absolute avg return for that regime
 - **Others** (green/red): avg alpha vs SPY — width proportional to magnitude
 
-```{r x5, fig.height=9, fig.width=12}
+```{r x5, fig.height=14, fig.width=16}
 plot_sm_diagram_perf(xts_ret, tickers = core_universe,
                      master = "SPY", t_fall = 0.10)
 ```
