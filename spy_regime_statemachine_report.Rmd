@@ -1,0 +1,329 @@
+---
+title: "SPY Drawdown Regime & State Machine — Methodology and Results"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 8
+)
+
+library(tidyverse)
+library(xts)
+library(PerformanceAnalytics)
+library(scales)
+library(patchwork)
+library(here)
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+source(here("scripts_spy_dd_regime/regime_multi_ticker.R"))
+source(here("scripts_spy_dd_regime/spy_dd_regime_rel.R"))
+source(here("scripts_spy_dd_regime/spy_statemachine_diagram_rel.R"))
+
+# ── Universe ──────────────────────────────────────────────────────────────────
+core_universe <- c("IEF", "HYG", "IEFA", "XLK", "XLF", "XLI", "GLD")
+
+spy_ret <- xts_ret[, "SPY"]
+rt      <- build_regime_table(spy_ret)
+```
+
+---
+
+## 1. Overview
+
+This report documents the **SPY Drawdown Regime Engine** — a 3-state classification
+system that labels every calendar day as one of:
+
+| State | Colour | Condition |
+|---|---|---|
+| **Fall** | <span style="color:#D90429">■</span> Red | Running drawdown from recent peak ≥ 10% |
+| **Recovery** | <span style="color:#F77F00">■</span> Orange | After Fall trough — climbing back toward peak |
+| **Consolidation** | <span style="color:#2D6A4F">■</span> Green | Everything else — expansionary phase |
+
+The engine is fully data-driven (no manual labels), uses only `xts_ret[,"SPY"]`,
+and is parameterised by a single threshold `t_fall` (default 10%).
+
+Results are visualised through four scripts:
+
+| Script | Purpose |
+|---|---|
+| `spy_dd_regime.R` | Single-ticker regime overlay + stats |
+| `regime_multi_ticker.R` | Multi-ticker stacked bar overlay |
+| `spy_dd_regime_rel.R` | Mixed mode — SPY absolute, others α vs SPY |
+| `spy_statemachine_diagram_rel.R` | State machine flow diagram + performance panels |
+
+```{r data-summary, echo=TRUE}
+cat(sprintf("SPY data  : %s → %s  (%d trading days)\n",
+            as.character(start(spy_ret)),
+            as.character(end(spy_ret)),
+            nrow(spy_ret)))
+cat(sprintf("Regime periods identified : %d\n", nrow(rt)))
+cat(sprintf("Current regime            : %s  (since %s)\n",
+            as.character(tail(rt$regime, 1)),
+            format(tail(rt$xmin, 1), "%d %b %Y")))
+```
+
+---
+
+## 2. Regime Definitions
+
+### 2.1 Three-State Model
+
+The engine identifies macro drawdown events using `PerformanceAnalytics::table.Drawdowns()`
+and classifies every period as follows:
+
+$$\text{Fall}_i : \quad DD_t \leq -t_{fall}$$
+
+$$\text{Recovery}_i : \quad \text{From trough of Fall}_i \text{ until drawdown recovered}$$
+
+$$\text{Consolidation}_i : \quad \text{All remaining expansion periods}$$
+
+where the running drawdown at time $t$ is:
+
+$$DD_t = \frac{P_t}{\max_{s \leq t} P_s} - 1$$
+
+### 2.2 Empirical Period Summary
+
+```{r regime-table, echo=FALSE}
+rt %>%
+  as_tibble() %>%
+  mutate(
+    regime        = as.character(regime),
+    xmin          = format(xmin, "%d %b %Y"),
+    xmax          = format(xmax, "%d %b %Y"),
+    period_return = scales::percent(period_return, accuracy = 0.1),
+    ann_return    = scales::percent(ann_return,    accuracy = 0.1)
+  ) %>%
+  select(regime, xmin, xmax, days, period_return, ann_return) %>%
+  knitr::kable(
+    col.names = c("Regime", "From", "To", "Days", "Period Return", "Ann. Return"),
+    align = c("l","l","l","r","r","r")
+  )
+```
+
+---
+
+## 3. Time-Series Regime Chart
+
+`plot_regime_overlay()` — cumulative SPY return with regime bar row and `▶` transition
+arrows coloured by the incoming state.
+
+```{r x1, fig.height=7}
+plot_regime_overlay(spy_ret, t_fall = 0.10, asset_name = "SPY")
+```
+
+---
+
+## 4. Regime Statistics
+
+`plot_regime_stats()` — average period return, annualised return, duration, and
+fraction of time spent in each state.
+
+```{r x2, fig.height=5}
+plot_regime_stats(spy_ret, asset_name = "SPY")
+```
+
+---
+
+## 5. Monthly Calendar Heatmap
+
+`plot_regime_calendar()` — each month coloured by dominant regime. Useful for
+identifying seasonal patterns in drawdown cycles.
+
+```{r x3, fig.height=6}
+plot_regime_calendar(spy_ret, asset_name = "SPY")
+```
+
+---
+
+## 6. State Machine Flow Diagram
+
+### 6.1 Pure State Machine
+
+`plot_sm_diagram()` — directed graph of the 3-state cycle. Each node shows:
+*N periods · avg duration · avg return · **speed** (annualised return) · % of time*.
+Each edge shows the transition rule and empirical probability (`p = XX%`).
+
+```{r x4, fig.height=7, fig.width=11}
+plot_sm_diagram(xts_ret, master = "SPY", t_fall = 0.10)
+```
+
+### 6.2 State Machine + Relative Performance
+
+`plot_sm_diagram_perf()` — same triangle layout with a **performance panel** below
+each node. One horizontal bar per ticker:
+
+- **SPY** (navy): absolute avg return for that regime
+- **Others** (green/red): avg alpha vs SPY — width proportional to magnitude
+
+```{r x5, fig.height=9, fig.width=12}
+plot_sm_diagram_perf(xts_ret, tickers = core_universe,
+                     master = "SPY", t_fall = 0.10)
+```
+
+---
+
+## 7. Ticker × Regime Alpha Heatmap
+
+`plot_sm_alpha_heatmap()` — compact matrix: rows = tickers, columns = regime types.
+SPY row shows absolute avg return; all other rows show avg alpha vs SPY.
+Navy border distinguishes SPY from relative rows.
+
+```{r x6, fig.height=5, fig.width=9}
+plot_sm_alpha_heatmap(xts_ret, tickers = core_universe,
+                      master = "SPY", t_fall = 0.10)
+```
+
+---
+
+## 8. Regime Transition Probability Matrix
+
+`plot_sm_transition_matrix()` — empirical 4×4 (3×3 here) transition heatmap.
+Each cell: observed probability + count. Row = From, Column = To.
+
+```{r x7, fig.height=5, fig.width=7}
+plot_sm_transition_matrix(xts_ret, master = "SPY", t_fall = 0.10)
+```
+
+---
+
+## 9. Multi-Ticker Regime Overlay
+
+`plot_regime_multi_overlay()` — SPY cumulative return at top; stacked bar rows below,
+one per ticker, showing absolute return per regime period.
+
+```{r x8, fig.height=9}
+plot_regime_multi_overlay(
+  xts_ret  = xts_ret,
+  tickers  = core_universe,
+  master   = "SPY",
+  t_fall   = 0.10,
+  relative = FALSE
+)
+```
+
+---
+
+## 10. Relative Mode — Mixed Overlay
+
+`plot_regime_rel_overlay()` — SPY row shows **absolute** return per period;
+all other rows show **alpha vs SPY** (+ prefix = outperformed).
+
+```{r x9, fig.height=9}
+plot_regime_rel_overlay(
+  xts_ret = xts_ret,
+  tickers = core_universe,
+  master  = "SPY",
+  t_fall  = 0.10
+)
+```
+
+---
+
+## 11. Relative Mode — Per-Regime Heatmap
+
+`plot_regime_rel_heatmap()` — each column is one historical regime period (not a
+regime type). SPY row bordered in navy; diverging red/green scale centred at zero.
+
+```{r x10, fig.height=5}
+plot_regime_rel_heatmap(
+  xts_ret = xts_ret,
+  tickers = core_universe,
+  master  = "SPY",
+  t_fall  = 0.10
+)
+```
+
+---
+
+## 12. Relative Mode — Summary by Regime Type
+
+`plot_regime_rel_summary()` — average return/alpha per ticker faceted by regime type.
+Sorted within each facet; `+` prefix indicates outperformance of SPY.
+
+```{r x11, fig.height=6}
+plot_regime_rel_summary(
+  xts_ret = xts_ret,
+  tickers = core_universe,
+  master  = "SPY",
+  t_fall  = 0.10
+)
+```
+
+---
+
+## 13. Key Findings
+
+```{r x12, echo=FALSE}
+stats_tbl <- rt %>%
+  as_tibble() %>%
+  mutate(regime = as.character(regime)) %>%
+  group_by(regime) %>%
+  summarise(
+    N           = n(),
+    avg_days    = round(mean(days)),
+    avg_ret     = mean(period_return),
+    avg_ann_ret = mean(ann_return, na.rm = TRUE),
+    pct_time    = sum(days) / sum(rt$days),
+    .groups     = "drop"
+  )
+
+cat("── Regime Summary ──────────────────────────────────────────────────────\n")
+for (i in seq_len(nrow(stats_tbl))) {
+  r <- stats_tbl[i, ]
+  cat(sprintf(
+    "  %-16s  N=%-2d  avg %3d days  avg return %+5.1f%%  speed %+5.1f%%/yr  %4.0f%% of time\n",
+    r$regime, r$N, r$avg_days,
+    r$avg_ret * 100, r$avg_ann_ret * 100, r$pct_time * 100
+  ))
+}
+cat("────────────────────────────────────────────────────────────────────────\n")
+
+current <- tail(rt, 1)
+cat(sprintf("\nCurrent regime : %s\n", as.character(current$regime)))
+cat(sprintf("Started        : %s\n", format(current$xmin, "%d %b %Y")))
+cat(sprintf("Duration so far: %d days\n", as.numeric(Sys.Date() - current$xmin)))
+```
+
+**Structural observations:**
+
+- **Fall** is the shortest and most intense state — large negative returns over a
+  relatively small number of days, with high annualised velocity.
+- **Recovery** is the mirror — the market recoups losses quickly once the trough is
+  confirmed; speed in Recovery typically exceeds Fall speed in absolute terms.
+- **Consolidation** dominates calendar time (~60%+). Ticker alpha is most dispersed
+  here — sector rotation signals are strongest in this state.
+- **Transition probabilities** are highly deterministic: Fall → Recovery is nearly
+  always 100%; Recovery → Consolidation is the dominant path.
+
+---
+
+## 14. Next Steps
+
+| Priority | Item |
+|---|---|
+| 1 | Wire regime labels into SAA/TAA signal layer as a regime overlay |
+| 2 | Extend relative analysis to full 59-ETF universe |
+| 3 | Backtest sector-rotation strategy conditioned on regime state |
+| 4 | Add Consolidation sub-classification (early vs late cycle) |
+| 5 | Embed real-time regime badge in Shiny dashboard |
+
+---
+
+*Generated with `spy_statemachine_diagram_rel.R` · `spy_dd_regime.R` ·
+`regime_multi_ticker.R` · `spy_dd_regime_rel.R`*
