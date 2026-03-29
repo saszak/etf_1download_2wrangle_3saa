@@ -1,0 +1,287 @@
+---
+title: "Calendar Year Analog Projection"
+subtitle: "Trend vs Reversal Probability from Historical Analogs"
+author: "Sovereign Intelligence"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    code_folding: hide
+    fig_width: 11
+    fig_height: 6
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    fig_width: 11
+    fig_height: 6
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.align  = "center"
+)
+
+library(tidyverse)
+library(scales)
+library(here)
+
+source(here("scripts/00_init_universe.R"))
+source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+source(here("utility/plot_calendar_perf.R"))
+source(here("utility/plot_calendar_analog.R"))
+
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+xts_rel <- readRDS(here("02_data_processed/xts_rel.rds"))
+rt      <- build_regime_table(xts_ret[, "SPY"], t_fall = 0.10)
+
+TICKERS <- c("SPY", "QQQ", "GLD", "TLT", "XLK", "SMH", "XLF", "XLI")
+```
+
+---
+
+## 1 · The Question
+
+> *"Given what has happened so far this year, how likely is it that the current
+> trend continues to year-end — and how likely is a reversal?"*
+
+This report addresses that question using two complementary tools:
+
+1. **Transition matrices** — what fraction of historical Up/Down years were
+   followed by another Up/Down year, conditional on the market regime
+2. **Historical analog matching** — find the calendar years whose YTD return
+   (measured at today's day-of-year) most closely resembles the current year,
+   then project forward using the distribution of where those years ended up
+
+Both tools are honest about sample size: with ~15 years of data per ticker,
+confidence intervals are wide. The value is in **directional signal and
+regime context**, not precise probability estimates.
+
+---
+
+## 2 · Academic Background
+
+### 2.1 What the literature says about annual return predictability
+
+| Finding | Source | Implication |
+|---|---|---|
+| 12-month momentum persists at 3–12m horizons | Jegadeesh & Titman (1993) | Trend signal valid within a calendar year |
+| 3–5 year reversals after sustained runs | De Bondt & Thaler (1985) | Fade long winning streaks across years |
+| 12-month seasonal autocorrelation | Heston & Sadka (2008) | Same-month-last-year has predictive power |
+| Momentum crashes in Recovery regimes | Daniel & Moskowitz (2016) | Regime conditions the trend/reversal call |
+| Window dressing inflates year-end winner prices | Lakonishok et al. (1991) | Q4 momentum may overstate alpha for growth ETFs |
+| Minimum 3–5 years to distinguish skill from luck | Grinold & Kahn | Annual t-stats are wide; treat probabilities as soft |
+
+### 2.2 Why the annual horizon is special
+
+Calendar year boundaries create **artificial discontinuities**:
+
+- Institutional flows reset at year-end (window dressing, tax-loss harvesting)
+- Performance measurement resets to 0% on January 1
+- Momentum measured at 12-month lags has documented seasonality (Heston & Sadka)
+
+This means the calendar-year trend/reversal question is **not the same** as a
+rolling 12-month question. The year-boundary itself affects behaviour.
+
+### 2.3 Regime conditioning matters
+
+Daniel & Moskowitz (2016) show momentum strategies crash specifically in
+**Recovery regimes** — when the market rebounds sharply after a Fall.
+In those environments, what looked like a strong trend (e.g. defensive
+outperformance in the Fall) reverses violently.
+
+This motivates computing transition probabilities **separately** for each
+of our three regimes: Fall, Recovery, and Consolidation.
+
+---
+
+## 3 · Method A — Transition Matrices
+
+### 3.1 How it works
+
+For each ticker, we:
+
+1. Compute the full-year calendar return for every year in the history
+2. Classify each year as **Up** (≥ 0%) or **Down** (< 0%)
+3. Build a 2×2 transition matrix: P(next year Up | this year Up), etc.
+4. Repeat separately for years that occurred in each regime
+
+The lag-1 autocorrelation $\rho$ of annual returns gives a single summary
+statistic:
+
+- $\rho > 0$ → **momentum** (trend more likely than reversal)
+- $\rho < 0$ → **mean reversion** (reversal more likely than trend)
+- $|\rho| \leq 0.1$ → **no signal** (coin-flip at annual horizon)
+
+### 3.2 Results
+
+```{r transitions, results='asis'}
+for (tk in TICKERS) {
+  cat(sprintf("\n\n#### %s\n\n", tk))
+  cat("```\n")
+  compute_transitions(xts_ret[, tk], rt)
+  cat("```\n\n")
+}
+```
+
+### 3.3 Interpretation guide
+
+The transition matrix is useful for **framing the prior** before looking at
+the current year's YTD. Key patterns to look for:
+
+- **P(Up|Up) > 60%** — meaningful momentum tendency; current up-year is more
+  likely to finish up than down
+- **P(Up|Down) > 60%** — strong recovery pattern; down years tend to bounce
+- **Regime divergence** — if P(Up|Up) in Consolidation >> P(Up|Up) in Fall,
+  the regime matters more than the prior year's direction
+
+> **Caution:** With ~15 years of data, a "70%" estimate has a 95% confidence
+> interval of roughly ±25%. These are soft signals, not actuarial tables.
+
+---
+
+## 4 · Method B — Historical Analog Matching
+
+### 4.1 How it works
+
+**Step 1 — Establish position in the year**
+Find today's trading day number within the calendar year (e.g. day 55 of ~252).
+
+**Step 2 — Compute each historical year's YTD at that same day**
+For every past year, compute the cumulative return from Jan 1 to trading day 55.
+
+**Step 3 — Find analogs**
+Select years where the YTD return at that day was within ±6 percentage points
+of the current year's YTD. If fewer than 3 analogs exist, widen the window
+in 2pp steps until at least 3 are found.
+
+**Step 4 — Project forward**
+For each analog year, observe what happened from day 55 to year-end.
+Compute:
+
+$$P(\text{Trend}) = \frac{\text{analog years that ended in same direction as current YTD}}{\text{total analog years}}$$
+
+**Step 5 — Build the cone**
+Plot the full-year paths of analog years. From today's day forward, shade the
+10–90th percentile band (outer cone) and 25–75th percentile band (inner cone).
+The dashed line is the median analog path.
+
+### 4.2 What the chart shows
+
+```
+Grey lines    = all historical years (context)
+Blue lines    = analog years (similar YTD at today's point in the year)
+Inner cone    = 25–75th percentile range of where analogs went from here
+Outer cone    = 10–90th percentile range
+Dashed blue   = median analog path forward
+Red line      = current year (stops at today)
+Dotted vert.  = "today" marker
+Annotation    = P(Trend), P(Reversal), analog year list, current regime
+```
+
+### 4.3 Why analog matching is better than autocorrelation alone
+
+Autocorrelation uses all years equally. Analog matching **conditions on
+magnitude**: a year that is +15% YTD in March is not the same as a year
+that is +1% YTD in March, even though both are "Up". The analog method
+naturally respects this.
+
+It is closest in spirit to the **ensemble forecast** approach used in
+meteorology — where today's atmospheric state is matched to historical
+states, and the distribution of subsequent outcomes is used as the forecast.
+
+---
+
+## 5 · Analog Projection Charts
+
+```{r analog-plots, fig.height=7, results='asis'}
+for (tk in TICKERS) {
+  cat(sprintf("\n\n### %s\n\n", tk))
+  print(plot_calendar_analog(xts_ret[, tk], rt))
+  cat("\n\n")
+}
+```
+
+---
+
+## 6 · Calendar Year History (Reference)
+
+Full calendar year paths for all tickers — useful for visually identifying
+which years were the analogs and how they evolved.
+
+```{r cal-history, fig.height=9}
+plot_multi_calendar_perf(xts_ret[, TICKERS], ncol = 2)
+```
+
+---
+
+## 7 · Limitations & Honest Caveats
+
+| Limitation | Why it matters |
+|---|---|
+| **Small sample** | ~15 annual observations per ticker. A "70% P(trend)" has ±25% confidence interval. |
+| **Non-stationarity** | Regime structure, correlations, and volatility change over time. Historical analogs may not reflect current market structure. |
+| **Calendar boundary artefact** | Transition probabilities are measured at Dec 31 — a date that has institutional significance (rebalancing, flows) not shared by other dates. |
+| **Partial year extrapolation** | The analog method assumes the remainder of the year is drawn from the same distribution as historical analog years. Structural breaks (policy changes, exogenous shocks) can invalidate this. |
+| **No factor conditioning** | Analogs are matched on raw return only, not on macro regime, valuation, or rate environment. Adding regime conditioning (from `rt`) would improve signal. |
+
+---
+
+## 8 · How to Use in Practice
+
+**Step 1 — Check the regime first**
+The current regime (shown in the annotation box) tells you which part of
+the transition matrix is relevant. A Consolidation regime with P(trend)=70%
+is more reliable than the same number in a Fall regime.
+
+**Step 2 — Look at the cone width**
+A wide cone = high uncertainty = do not trade on the signal alone.
+A narrow cone with most analogs clustered = higher confidence.
+
+**Step 3 — Check n analogs**
+If n < 5, the probabilities are almost meaningless statistically.
+Use the chart as qualitative context only.
+
+**Step 4 — Combine with regime analysis**
+Cross-reference with `plot_rel_calendar_perf()` to see whether the ticker's
+current year performance is being driven by absolute return or by alpha vs SPY.
+A ticker that is up primarily because SPY is up (small gap between panels)
+is more vulnerable to reversal in a regime shift.
+
+---
+
+## 9 · Scripts & Reproducibility
+
+| File | Purpose |
+|---|---|
+| `utility/plot_calendar_analog.R` | `compute_transitions()` and `plot_calendar_analog()` |
+| `utility/plot_calendar_perf.R` | `plot_calendar_perf()`, `plot_multi_calendar_perf()`, `plot_rel_calendar_perf()` |
+| `scripts_spy_dd_regime/spy_dd_regime.R` | `build_regime_table()` |
+
+To refresh this report with today's data:
+
+```r
+rmarkdown::render("Rmd/calendar_analog_report.Rmd")
+```
+
+To run interactively for a single ticker:
+
+```r
+source("utility/plot_calendar_analog.R")
+rt <- build_regime_table(xts_ret[, "SPY"], t_fall = 0.10)
+
+compute_transitions(xts_ret[, "GLD"], rt)
+plot_calendar_analog(xts_ret[, "GLD"], rt)
+plot_calendar_analog(xts_ret[, "GLD"], rt, window_pct = 0.10)  # wider window
+```
+
+---
+
+*Report generated: `r format(Sys.Date(), "%d %B %Y")` |
+Data: daily log returns via `xts_ret_returns.rds` |
+Regime engine: `build_regime_table()` with T_FALL = 10%*

@@ -40,9 +40,10 @@ batch_enrich_registry <- function() {
     message("🛡️ Processing: ", t)
     
     # Filter for the specific ticker and convert to XTS
-    ticker_data <- raw_df %>% 
-      filter(symbol == t) %>% 
-      arrange(date)
+    ticker_data <- raw_df %>%
+      filter(symbol == t) %>%
+      arrange(date) %>%
+      distinct(date, .keep_all = TRUE)   # guard against duplicate dates
     
     if(nrow(ticker_data) < sm_params$lookback_sma) {
       message("⚠️ Skip: ", t, " has insufficient data for SMA200.")

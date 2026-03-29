@@ -174,3 +174,4 @@ build_and_launch_shiny <- function() {
   message("🚀 Launching Sentinel Intelligence UI with Membership Logic...")
   rmarkdown::run(report_path, shiny_args = list(launch.browser = TRUE))
 }
+

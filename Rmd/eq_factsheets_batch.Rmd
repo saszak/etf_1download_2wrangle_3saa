@@ -1,0 +1,241 @@
+# ── Render from console ───────────────────────────────────────────────────────
+# Full equity universe (all g_eq_tickers in xts_ret):
+#   rmarkdown::render(
+#     here::here("Rmd/eq_factsheets_batch.Rmd"),
+#     output_file = here::here("03_reports/eq_factsheets_batch.html")
+#   )
+#
+# Custom benchmark or subset via params:
+#   rmarkdown::render(..., params = list(bmk = "URTH", t_fall = 0.10))
+# ─────────────────────────────────────────────────────────────────────────────
+
+---
+title: "Equity ETF Factsheets — Full Universe"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: true
+    toc_depth: 2
+    theme: flatly
+    highlight: tango
+    fig_caption: true
+params:
+  bmk:    "SPY"
+  t_fall: 0.10
+---
+
+```{css, echo=FALSE}
+.caption      { color: #1B3A6B; font-size: 0.82em; font-style: italic;
+                border-left: 3px solid #1B3A6B; padding-left: 6px; margin-top: 4px; }
+.section-div  { border-top: 2px solid #dee2e6; margin: 48px 0 24px 0; }
+.ticker-badge { background: #F0F4FA; border-left: 4px solid #1B2A4A;
+                padding: 7px 14px; margin-bottom: 14px; font-size: 0.88em; color: #333; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(tidyverse)
+library(xts)
+library(zoo)
+library(patchwork)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(here)
+
+select <- dplyr::select
+
+# ── params fallback (interactive / render-without-params) ─────────────────────
+if (!exists("params")) params <- list(bmk = "SPY", t_fall = 0.10)
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+if (!exists("xts_ret"))
+  xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+if (!exists("etf_metadata"))
+  source(here("scripts/00_init_universe.R"))
+
+if (!exists("build_regime_table"))
+  source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+
+if (!exists("plot_regime_overlay_ext") || !exists("plot_regime_triple"))
+  source(here("key_plots/chart_regime_rel_overlay.R"))
+
+source(here("utility/factsheet_functions.R"))
+
+# ── Regime table (benchmark) ──────────────────────────────────────────────────
+rt <- build_regime_table(xts_ret[, params$bmk], params$t_fall)
+
+# ── Equity tickers: in universe AND in xts_ret, excluding the benchmark ───────
+eq_tickers <- intersect(g_eq_tickers, colnames(xts_ret))
+eq_tickers <- eq_tickers[eq_tickers != params$bmk]
+```
+
+## Universe overview
+
+```{r overview-table}
+overview <- etf_metadata %>%
+  filter(ticker %in% eq_tickers) %>%
+  select(ticker, name, pf_function) %>%
+  arrange(pf_function, ticker)
+
+kable(overview,
+      col.names = c("Ticker", "Name", "Portfolio Function"),
+      caption   = paste0("Equity ETFs included in this report (n = ", nrow(overview),
+                         ")  |  Benchmark: ", params$bmk)) %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, monospace = TRUE, color = "#1B2A4A") %>%
+  column_spec(3, color = "#555555")
+```
+
+---
+
+```{r batch-factsheets, results='asis'}
+# ── Per-ticker section template ───────────────────────────────────────────────
+# Each ticker gets:
+#   1. Metadata badge (class / function / date range)
+#   2. Summary stats table
+#   3. Triple overlay  (plot_regime_triple) — cumret + rolling 12m relret
+#   4. Regime overlay  (plot_regime_overlay_ext) — BMK bars + ticker line + rel area
+#   5. 8-panel factsheet (fs_render combined)
+#   6. Own regime stats (plot_regime_stats)
+#
+# knit_child runs each block in the parent environment so variables defined in
+# earlier sub-chunks (fs_out) are available in later ones within the same ticker.
+
+template <- paste0("
+
+## {{tk}} \u2014 {{tk_name}}
+
+<div class='ticker-badge'>
+<strong>{{tk}}</strong> &nbsp;|&nbsp;
+Class: {{tk_class}} &nbsp;|&nbsp;
+Function: {{tk_pfn}} &nbsp;|&nbsp;
+Period: {{tk_start}} \u2192 {{tk_end}} &nbsp;|&nbsp;
+Benchmark: {{bmk}}
+</div>
+
+", "\x60\x60\x60", "{r s1-{{tk}}, fig.show='asis'}
+.fs_out_{{tk}} <- tryCatch(
+  suppressMessages(
+    fs_render('{{tk}}', bmk = params$bmk, ret_xts = xts_ret, rt = rt)
+  ),
+  error = function(e) { message('fs_render failed for {{tk}}: ', conditionMessage(e)); NULL }
+)
+if (!is.null(.fs_out_{{tk}})) {
+  kable(.fs_out_{{tk}}$stats,
+        align   = c('l','r','r','r','r','r'),
+        caption = paste0('Summary statistics \u2014 {{tk}} vs {{bmk}}')) %>%
+    kable_styling(full_width = FALSE,
+                  bootstrap_options = c('hover','condensed','bordered'),
+                  position = 'center', font_size = 12) %>%
+    row_spec(0, bold = TRUE, background = '#1B2A4A', color = 'white') %>%
+    row_spec(1, background = '#F0F4FA') %>%
+    row_spec(3, bold = TRUE) %>%
+    column_spec(1, bold = TRUE, color = '#1B2A4A') %>%
+    print()
+} else { cat('> Stats table unavailable for {{tk}}.\n') }
+", "\x60\x60\x60", "
+
+", "\x60\x60\x60", "{r s1b-{{tk}}, fig.height=9, fig.cap='Triple overlay + rolling 12m relative return \u2014 {{tk}} vs {{bmk}}'}
+tryCatch(
+  print(plot_regime_triple('{{tk}}', bmk = '{{bmk}}', xts_ret = xts_ret)),
+  error = function(e) ggplot() +
+    annotate('text', x=.5, y=.5, colour='grey50', size=3.5,
+             label = paste0('Triple error ({{tk}}): ', conditionMessage(e))) + theme_void()
+)
+", "\x60\x60\x60", "
+
+", "\x60\x60\x60", "{r s2-{{tk}}, fig.height=8, fig.cap='Regime overlay \u2014 {{tk}} vs {{bmk}}'}
+tryCatch(
+  print(plot_regime_overlay_ext('{{tk}}', bmk = '{{bmk}}', xts_ret = xts_ret)),
+  error = function(e) ggplot() +
+    annotate('text', x=.5, y=.5, colour='grey50', size=3.5,
+             label = paste0('Overlay error ({{tk}}): ', conditionMessage(e))) + theme_void()
+)
+", "\x60\x60\x60", "
+
+", "\x60\x60\x60", "{r s3-{{tk}}, fig.height=22, fig.cap='8-panel factsheet \u2014 {{tk}} vs {{bmk}}'}
+if (!is.null(.fs_out_{{tk}})) {
+  print(.fs_out_{{tk}}$combined)
+} else {
+  tryCatch(
+    print(suppressMessages(
+      fs_render('{{tk}}', bmk = params$bmk, ret_xts = xts_ret, rt = rt)
+    )$combined),
+    error = function(e) ggplot() +
+      annotate('text', x=.5, y=.5, colour='grey50', size=3.5,
+               label = paste0('Factsheet error ({{tk}}): ', conditionMessage(e))) + theme_void()
+  )
+}
+", "\x60\x60\x60", "
+
+", "\x60\x60\x60", "{r s4-{{tk}}, fig.height=5, fig.cap='Own regime statistics \u2014 {{tk}}'}
+tryCatch(
+  print(plot_regime_stats(xts_ret[, '{{tk}}'], asset_name = '{{tk}}')),
+  error = function(e) ggplot() +
+    annotate('text', x=.5, y=.5, colour='grey50', size=3.5,
+             label = paste0('Regime stats error ({{tk}}): ', conditionMessage(e))) + theme_void()
+)
+", "\x60\x60\x60", "
+
+<div class='section-div'></div>
+
+")
+
+# ── Render ────────────────────────────────────────────────────────────────────
+sections <- lapply(eq_tickers, function(tk) {
+
+  m        <- etf_metadata[etf_metadata$ticker == tk, ]
+  tk_name  <- if (nrow(m) > 0) m$name[1]        else tk
+  tk_class <- if (nrow(m) > 0) m$asset_class[1] else "Equity"
+  tk_pfn   <- if (nrow(m) > 0) m$pf_function[1] else "—"
+
+  col_data <- xts_ret[, tk]
+  valid    <- !is.na(col_data)
+  tk_start <- if (any(valid)) format(min(index(col_data[valid]))) else "—"
+  tk_end   <- if (any(valid)) format(max(index(col_data[valid]))) else "—"
+
+  expanded <- knitr::knit_expand(
+    text     = template,
+    tk       = tk,
+    tk_name  = tk_name,
+    tk_class = tk_class,
+    tk_pfn   = tk_pfn,
+    tk_start = tk_start,
+    tk_end   = tk_end,
+    bmk      = params$bmk
+  )
+
+  knitr::knit_child(text = expanded, envir = environment(), quiet = TRUE)
+})
+
+cat(paste(unlist(sections), collapse = "\n"))
+```
+
+---
+
+```{r footer}
+cat(sprintf(
+  "_Generated %s · %d equity ETFs · Benchmark: %s · T\\_fall = %.0f%%_",
+  format(Sys.Date(), "%Y-%m-%d"),
+  length(eq_tickers),
+  params$bmk,
+  params$t_fall * 100
+))
+```

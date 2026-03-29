@@ -15,7 +15,8 @@
 #   plot_regime_overlay()   Main chart: cumulative line + 2 bar rows + stats
 #   plot_regime_stats()     Bar chart: avg return & avg duration per regime
 #   plot_regime_calendar()  Monthly return heatmap coloured by regime
-#   run_regime_analysis()   Convenience wrapper — runs all three plots
+#   run_regime_analysis()       Convenience wrapper — runs all three plots
+#   plot_self_regime_multi()    Per-ticker own regime overlay (not SPY's cycle)
 #
 # INPUTS (no global env dependency)
 #   xts_ret_col   : single-column xts of daily returns (e.g. xts_ret[,"SPY"])
@@ -168,18 +169,25 @@ label_daily_regime <- function(xts_ret_col,
 # ==============================================================================
 
 plot_regime_overlay <- function(xts_ret_col,
-                                 t_fall      = 0.10,
-                                 t_cruise    = 0.05,
-                                 asset_name  = "SPY",
-                                 label_size  = 2.8,
-                                 overlay_ret = NULL,     # optional 2nd ticker xts
-                                 overlay_name = NULL) {
+                                 t_fall        = 0.10,
+                                 t_cruise      = 0.05,
+                                 asset_name    = "SPY",
+                                 label_size    = 2.8,
+                                 overlay_ret   = NULL,     # optional 2nd ticker xts
+                                 overlay_name  = NULL,
+                                 t_fall_jitter = NULL) {   # optional finer threshold bar
 
   rt     <- build_regime_table(xts_ret_col, t_fall, t_cruise)
   cum_df <- tibble(
     date   = index(xts_ret_col),
     cumret = as.numeric(cumprod(1 + xts_ret_col) - 1)
   )
+
+  # ── Jitter regime table (finer threshold) ─────────────────────────────────
+  rt_jitter <- if (!is.null(t_fall_jitter)) {
+    stopifnot(t_fall_jitter < t_fall)
+    build_regime_table(xts_ret_col, t_fall_jitter, t_fall_jitter / 2)
+  } else NULL
 
   # ── Coordinate system ──────────────────────────────────────────────────────
   max_val     <- max(cum_df$cumret, na.rm = TRUE)
@@ -188,10 +196,14 @@ plot_regime_overlay <- function(xts_ret_col,
 
   bar_h    <- total_range * 0.08
   gap      <- total_range * 0.015
-  n_rows   <- if (!is.null(overlay_ret)) 2L else 1L
+  n_rows   <- 1L +
+              (!is.null(overlay_ret))  +
+              (!is.null(t_fall_jitter))
 
-  y_row1   <- min_val - total_range * 0.18               # macro bar
-  y_row2   <- y_row1 - bar_h - gap                       # overlay bar (if any)
+  y_row1        <- min_val - total_range * 0.18               # macro bar (t_fall)
+  y_row2        <- y_row1 - bar_h - gap                       # overlay ticker bar
+  y_row_jitter  <- y_row1 - bar_h - gap                       # jitter bar (no overlay)
+  if (!is.null(overlay_ret)) y_row_jitter <- y_row2 - bar_h - gap
   y_floor  <- y_row1 - (n_rows * (bar_h + gap)) - total_range * 0.20
 
   # ── Year grid ──────────────────────────────────────────────────────────────
@@ -348,17 +360,33 @@ plot_regime_overlay <- function(xts_ret_col,
                hjust = 1.3, size = 4, fontface = "bold", color = "grey35")
   }
 
+  # ── Optional jitter bar row ────────────────────────────────────────────────
+  if (!is.null(rt_jitter)) {
+    p <- p +
+      geom_rect(
+        data = rt_jitter,
+        aes(xmin = xmin, xmax = xmax,
+            ymin = y_row_jitter, ymax = y_row_jitter + bar_h,
+            fill = regime),
+        color = "white", linewidth = 0.2, alpha = 0.70,
+        show.legend = FALSE
+      ) +
+      geom_text(
+        data = rt_jitter %>% filter(!is_thin),
+        aes(x     = xmin + (xmax - xmin) / 2,
+            y     = y_row_jitter + bar_h / 2,
+            label = label),
+        color = "white", size = label_size * 0.85, fontface = "bold"
+      ) +
+      annotate("text",
+               x     = min(cum_df$date),
+               y     = y_row_jitter + bar_h / 2,
+               label = "Jitter",
+               hjust = 1.3, size = 3.5, fontface = "italic", color = "grey45")
+  }
+
   # ── Regime legend & current regime badge ──────────────────────────────────
   p <- p +
-
-    # Current regime badge (top right)
-    annotate("label",
-             x = max(cum_df$date), y = max_val,
-             label    = current_label,
-             hjust    = 1, vjust = 1, size = 3.2, fontface = "bold",
-             color    = current_color,
-             fill     = "white", label.size = 0.6,
-             label.padding = unit(0.35, "lines")) +
 
     # Summary stats (bottom of chart, below year labels)
     annotate("text",
@@ -373,13 +401,6 @@ plot_regime_overlay <- function(xts_ret_col,
       aes(x = date, y = y_floor + total_range * 0.10, label = year),
       size = 3, fontface = "bold", color = "grey45"
     ) +
-
-    # Threshold labels
-    annotate("text",
-             x     = min(cum_df$date),
-             y     = y_row1 + bar_h / 2,
-             label = paste0("≥", percent(t_fall, accuracy = 1), " DD"),
-             hjust = 1.3, vjust = -1.5, size = 2.8, color = "grey55") +
 
     scale_x_date(expand = expansion(mult = c(0.13, 0.04))) +
     scale_y_continuous(
@@ -404,10 +425,17 @@ plot_regime_overlay <- function(xts_ret_col,
 
     labs(
       title    = paste(asset_name, "— Drawdown Regime Chart"),
-      subtitle = sprintf(
-        "Fall threshold: ≥%.0f%%  |  Regimes: Fall / Recovery / Consolidation",
-        t_fall * 100
-      )
+      subtitle = if (!is.null(t_fall_jitter)) {
+        sprintf(
+          "Macro threshold: ≥%.0f%%  |  Jitter threshold: ≥%.0f%%  |  Regimes: Fall / Recovery / Consolidation",
+          t_fall * 100, t_fall_jitter * 100
+        )
+      } else {
+        sprintf(
+          "Fall threshold: ≥%.0f%%  |  Regimes: Fall / Recovery / Consolidation",
+          t_fall * 100
+        )
+      }
     )
 
   p
@@ -604,6 +632,131 @@ run_regime_analysis <- function(xts_ret_col,
   invisible(rt)
 }
 
+# ==============================================================================
+# plot_self_regime_multi()
+# PURPOSE : For each ticker in `tickers`, build its own regime table and render
+#           plot_regime_overlay() using the ticker's own drawdown cycle.
+#           Each ticker gets its own Fall/Recovery/Consolidation — not SPY's.
+# ARGS
+#   xts_ret  : xts of daily returns (multi-column)
+#   tickers  : character vector of tickers to plot
+#   t_fall   : drawdown threshold (default 0.10)
+#   t_cruise : cruise threshold   (default 0.05)
+# ==============================================================================
+plot_self_regime_multi <- function(xts_ret,
+                                   tickers,
+                                   t_fall   = 0.10,
+                                   t_cruise = 0.05) {
+
+  tickers <- tickers[tickers %in% colnames(xts_ret)]
+
+  for (tk in tickers) {
+    cat(sprintf("\n── Self-Regime: %s ──\n", tk))
+    p <- suppressWarnings(
+      plot_regime_overlay(
+        xts_ret_col = xts_ret[, tk],
+        t_fall      = t_fall,
+        t_cruise    = t_cruise,
+        asset_name  = tk
+      )
+    )
+    print(p)
+  }
+
+  invisible(tickers)
+}
+
+# ==============================================================================
+# plot_regime_sync()
+# PURPOSE : Regime synchronisation heatmap — one row per ticker, x = time,
+#           fill = each ticker's own Fall/Recovery/Consolidation cycle.
+#           SPY added as reference row at top (separator line).
+#           Tickers sorted by % time in Fall (most defensive at bottom).
+# ARGS
+#   xts_ret     : xts of daily returns (multi-column)
+#   tickers     : character vector (SPY added automatically as reference)
+#   t_fall      : drawdown threshold (default 0.10)
+#   t_cruise    : cruise threshold   (default 0.05)
+#   title       : optional title override
+# ==============================================================================
+plot_regime_sync <- function(xts_ret,
+                              tickers,
+                              t_fall   = 0.10,
+                              t_cruise = 0.05,
+                              title    = NULL) {
+
+  tickers <- tickers[tickers %in% colnames(xts_ret)]
+  all_tks <- unique(c("SPY", tickers))
+  all_tks <- all_tks[all_tks %in% colnames(xts_ret)]
+
+  # Build regime rectangles per ticker
+  rects <- map_dfr(all_tks, function(tk) {
+    suppressWarnings(build_regime_table(xts_ret[, tk], t_fall, t_cruise)) %>%
+      mutate(ticker = tk)
+  })
+
+  # Ticker order: SPY first (top), then tickers sorted by % time in Fall asc
+  fall_pct <- rects %>%
+    filter(ticker != "SPY") %>%
+    group_by(ticker) %>%
+    summarise(
+      fall_pct = sum(days[regime == "Fall"], na.rm = TRUE) /
+                 sum(days, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(desc(fall_pct))
+
+  ticker_order <- c(rev(fall_pct$ticker), "SPY")   # SPY at top
+  rects <- rects %>%
+    mutate(
+      ticker = factor(ticker, levels = ticker_order),
+      color  = unname(REGIME_PAL[as.character(regime)])
+    )
+
+  plot_title <- title %||% paste0(
+    "Regime Synchronisation \u2014 Each Ticker\u2019s Own Cycle  |  T_fall = ",
+    scales::percent(t_fall, accuracy = 1)
+  )
+
+  ggplot(rects) +
+    geom_rect(aes(xmin = xmin, xmax = xmax,
+                  ymin = as.numeric(ticker) - 0.45,
+                  ymax = as.numeric(ticker) + 0.45,
+                  fill = color)) +
+    # SPY separator line
+    geom_hline(yintercept = which(ticker_order == "SPY") - 0.5,
+               color = "white", linewidth = 0.8) +
+    scale_fill_identity(
+      guide  = "legend",
+      name   = NULL,
+      labels = names(REGIME_PAL),
+      breaks = unname(REGIME_PAL)
+    ) +
+    scale_x_date(date_breaks = "2 years", date_labels = "%Y",
+                 expand = c(0.01, 0)) +
+    scale_y_continuous(
+      breaks = seq_along(ticker_order),
+      labels = ticker_order,
+      expand = c(0.02, 0)
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      panel.grid   = element_blank(),
+      axis.title   = element_blank(),
+      axis.text.y  = element_text(face = "bold", size = 9),
+      axis.text.x  = element_text(size = 9),
+      legend.position   = "bottom",
+      legend.key.width  = unit(1.2, "cm"),
+      legend.key.height = unit(0.35, "cm"),
+      plot.title   = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(color = "grey45", size = 9)
+    ) +
+    labs(
+      title    = plot_title,
+      subtitle = paste0("SPY = reference (top)  |  Others = own drawdown cycle  |  ",
+                        "sorted by % time in Fall (most defensive at top)")
+    )
+}
 
 # ==============================================================================
 # MAIN: Run analysis on SPY

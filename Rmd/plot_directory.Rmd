@@ -1,0 +1,539 @@
+---
+title: "Plot Directory — ETF Intelligence Project"
+subtitle: "Visual catalogue of all reusable plot functions with call signatures"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_caption: true
+---
+
+<style>
+h2 { border-bottom: 2px solid #2c3e50; padding-bottom: 4px; margin-top: 32px; }
+h3 { color: #2c3e50; margin-top: 20px; }
+.fn-box {
+  background: #f8f9fa;
+  border-left: 4px solid #3498db;
+  padding: 8px 14px;
+  margin: 8px 0 14px 0;
+  font-family: monospace;
+  font-size: 13px;
+  border-radius: 0 4px 4px 0;
+}
+.file-tag {
+  background: #2c3e50; color: #ecf0f1;
+  padding: 2px 8px; border-radius: 3px;
+  font-size: 11px; font-family: monospace;
+}
+.caption {
+  font-size: 12px;
+  font-weight: 600;
+  color: #2c3e50;
+  background: #f0f4f8;
+  border-left: 3px solid #3498db;
+  padding: 4px 10px;
+  margin-top: 4px;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(tidyverse)
+library(xts)
+library(PerformanceAnalytics)
+library(scales)
+library(patchwork)
+library(ggrepel)
+library(here)
+
+select  <- dplyr::select
+filter  <- dplyr::filter
+arrange <- dplyr::arrange
+
+# ── Core data ─────────────────────────────────────────────────────────────────
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+xts_rel <- readRDS(here("02_data_processed/xts_rel.rds"))
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+source(here("scripts/00_init_universe.R"))
+source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+source(here("scripts_spy_dd_regime/spy_dd_regime_rel.R"))
+source(here("scripts_spy_dd_regime/regime_multi_ticker.R"))
+source(here("scripts_spy_dd_regime/spy_statemachine_diagram_rel.R"))
+source(here("scripts_state_machine/sm_engine.R"))
+source(here("scripts_state_machine/sm_visuals.R"))
+source(here("scripts_saa_taa/saa_tree.R"))
+source(here("scripts_saa_taa/05_saa_portfolio.R"))
+source(here("scripts_exante_hypothesis/exante_engine.R"))
+source(here("scripts_exante_hypothesis/exante_visuals.R"))
+source(here("utility/plot_xts_pair.R"))
+source(here("utility/etf_ranges.R"))
+source(here("utility/plot_calendar_perf.R"))
+source(here("utility/plot_calendar_analog.R"))
+source(here("key_plots/chart_regime_rel_overlay.R"))
+source(here("key_plots/chart_multi_wealth_endlabel.R"))
+source(here("key_plots/chart_ma200_signal_panel.R"))
+source(here("key_plots/chart_pe_bands.R"))
+source(here("key_plots/calendar_heatmap.R"))
+source(here("shiny_dashboard/saa_config.R"))   # SAA_CONFIG: has saa_bucket + weight
+
+# ── Shared objects ─────────────────────────────────────────────────────────────
+spy_ret  <- xts_ret[, "SPY"]
+rt       <- build_regime_table(spy_ret)
+
+sector_tickers <- intersect(g_sector_tickers, colnames(xts_ret))
+core_tickers   <- c("SPY", "QQQ", "GLD", "AGG", "IEF")
+```
+
+---
+
+## Quick Reference — All Functions
+
+```{r ref-table, echo=FALSE, results='asis'}
+ref <- tibble::tribble(
+  ~Group,              ~Function,                      ~File,                                         ~Signature,
+  "Regime Engine",     "plot_regime_overlay",          "scripts_spy_dd_regime/spy_dd_regime.R",       "(xts_ret_col, t_fall=0.10, asset_name='SPY', overlay_ret=NULL, overlay_name=NULL, t_fall_jitter=NULL)",
+  "Regime Engine",     "plot_regime_stats",            "scripts_spy_dd_regime/spy_dd_regime.R",       "(xts_ret_col, t_fall=0.10, asset_name='SPY')",
+  "Regime Engine",     "plot_regime_calendar",         "scripts_spy_dd_regime/spy_dd_regime.R",       "(xts_ret_col, t_fall=0.10, asset_name='SPY')",
+  "Regime Engine",     "plot_regime_overlay_ext",      "key_plots/chart_regime_rel_overlay.R",        "(ticker, bmk='SPY', xts_ret, t_fall=0.10)",
+  "Regime Engine",     "plot_regime_triple",           "key_plots/chart_regime_rel_overlay.R",        "(ticker, bmk='SPY', xts_ret, t_fall=0.10, roll_win=252)",
+  "Regime Alpha",      "plot_regime_rel_summary",      "scripts_spy_dd_regime/spy_dd_regime_rel.R",   "(xts_ret, tickers, master='SPY', t_fall=0.10)",
+  "Regime Alpha",      "plot_regime_rel_heatmap",      "scripts_spy_dd_regime/spy_dd_regime_rel.R",   "(xts_ret, tickers, master='SPY', t_fall=0.10)",
+  "Regime Alpha",      "plot_abs_alpha_regime",        "scripts_spy_dd_regime/spy_dd_regime_rel.R",   "(xts_ret, tickers, rt, master='SPY', title=NULL)",
+  "Regime Alpha",      "plot_fall_fingerprint",        "scripts_spy_dd_regime/spy_dd_regime_rel.R",   "(xts_ret, tickers, rt=NULL, master='SPY', title=NULL)",
+  "Regime Alpha",      "plot_regime_fingerprint",      "scripts_spy_dd_regime/spy_dd_regime_rel.R",   "(xts_ret, tickers, rt=NULL, master='SPY', title=NULL)",
+  "Regime Alpha",      "plot_regime_fingerprint_box",  "scripts_spy_dd_regime/spy_dd_regime_rel.R",   "(xts_ret, tickers, rt=NULL, master='SPY', title=NULL)",
+  "Regime Alpha",      "plot_regime_sync",             "scripts_spy_dd_regime/spy_dd_regime.R",       "(xts_ret, tickers, t_fall=0.10, title=NULL)",
+  "Regime Alpha",      "plot_regime_multi_overlay",    "scripts_spy_dd_regime/regime_multi_ticker.R", "(xts_ret, tickers, master='SPY', relative=FALSE)",
+  "Regime Alpha",      "plot_regime_ticker_heatmap",   "scripts_spy_dd_regime/regime_multi_ticker.R", "(xts_ret, tickers, master='SPY', relative=FALSE)",
+  "State Machine",     "plot_sm_diagram",              "scripts_spy_dd_regime/spy_statemachine_diagram_rel.R", "(xts_ret, master='SPY', t_fall=0.10)",
+  "State Machine",     "plot_sm_diagram_perf",         "scripts_spy_dd_regime/spy_statemachine_diagram_rel.R", "(xts_ret, tickers, master='SPY', t_fall=0.10)",
+  "State Machine",     "plot_sm_alpha_heatmap",        "scripts_spy_dd_regime/spy_statemachine_diagram_rel.R", "(xts_ret, tickers, master='SPY', t_fall=0.10)",
+  "State Machine",     "plot_200DMA",                  "scripts_state_machine/sm_visuals.R",          "(ticker_symbol, xts_wealth, xts_price, upper=0.04, lower=-0.02)",
+  "State Machine",     "plot_signal_xts",              "scripts_state_machine/sm_visuals.R",          "(xts_data, ticker_name='Asset', thru=0.04, thrd=-0.02)",
+  "Pair Analysis",     "plot_xts_pair",                "utility/plot_xts_pair.R",                     "(xts1, xts2, label1, label2, roll_cor_win=250, regime_tbl=NULL)",
+  "Exante",            "plot_exante_quadrant",         "scripts_exante_hypothesis/exante_visuals.R",  "(exante_tbl, horizon_sel='full', label_n=6, color_by='role')",
+  "Exante",            "plot_corr_dd",                 "scripts_exante_hypothesis/exante_visuals.R",  "(exante_tbl, horizon_sel='full', label_n=8, show_loess=TRUE)",
+  "SAA Portfolio",     "plot_saa_ggbar",               "scripts_saa_taa/saa_tree.R",                  "(portfolio=SAA_PORTFOLIO, xts_ret=NULL)",
+  "SAA Portfolio",     "plot_saa_treemap",             "scripts_saa_taa/saa_tree.R",                  "(portfolio=SAA_PORTFOLIO, xts_ret=NULL)",
+  "DAA Framework",     "plot_multi_wealth_endlabel",   "key_plots/chart_multi_wealth_endlabel.R",     "(ret_list, rt, colours=NULL, labels=NULL)",
+  "DAA Framework",     "plot_ma200_signal_panel",      "key_plots/chart_ma200_signal_panel.R",        "(trend_signals_tbl, saa_tbl, tqs=NULL)",
+  "DAA Framework",     "plot_stacked_weight_timeline", "key_plots/chart_stacked_weight_timeline.R",   "(weight_history_tbl, saa_tbl, rt)",
+  "DAA Framework",     "plot_dd_frontier",             "key_plots/chart_dd_frontier.R",               "(dd_frontier_data, weight_marks=c(0.10, 0.20))",
+  "Market Context",    "plot_pe_bands",                "key_plots/chart_pe_bands.R",                  "(n_years=10, dark=TRUE, force_refresh=FALSE)",
+  "Market Context",    "plot_shiller_cape",            "key_plots/chart_pe_bands.R",                  "()",
+  "Market Context",    "plot_calendar_heatmap",        "key_plots/calendar_heatmap.R",                "(ticker='SPY', n_yr=5)",
+  "Market Context",    "plot_calendar_analog",         "utility/plot_calendar_analog.R",              "(xts_col, rt=NULL)",
+  "Calendar Perf",     "plot_calendar_perf",           "utility/plot_calendar_perf.R",                "(xts_col, title=NULL)",
+  "Calendar Perf",     "plot_multi_calendar_perf",     "utility/plot_calendar_perf.R",                "(xts_multi, title=NULL)",
+  "Calendar Perf",     "plot_rel_calendar_perf",       "utility/plot_calendar_perf.R",                "(ticker, xts_ret, xts_rel, bmk_label='SPY')"
+)
+
+ref %>%
+  knitr::kable(align = "llll") %>%
+  kableExtra::kable_styling(bootstrap_options = c("striped", "condensed", "hover"),
+                             full_width = TRUE, font_size = 12) %>%
+  kableExtra::column_spec(2, bold = TRUE, monospace = TRUE) %>%
+  kableExtra::column_spec(3, monospace = TRUE, color = "#555") %>%
+  kableExtra::column_spec(4, monospace = TRUE, color = "#555") %>%
+  kableExtra::pack_rows(index = table(ref$Group))
+```
+
+---
+
+## 1 · Regime Engine
+
+### plot_regime_overlay
+
+<div class="fn-box">plot_regime_overlay(xts_ret_col, t_fall=0.10, asset_name="SPY", overlay_ret=NULL, overlay_name=NULL, t_fall_jitter=NULL)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime.R</span>
+
+Cumulative return with Fall/Recovery/Consolidation regime bars + stats strip. Add `overlay_ret` to put a second ticker on the same panel.
+
+```{r pd-regime-overlay, fig.height=7, fig.cap="**Fig 1.1** `plot_regime_overlay(spy_ret)` — SPY cumulative return with regime bars"}
+plot_regime_overlay(spy_ret, asset_name = "SPY")
+```
+
+### plot_regime_overlay — with overlay ticker
+
+```{r pd-regime-overlay-tk, fig.height=7, fig.cap="**Fig 1.2** `plot_regime_overlay(..., overlay_ret, overlay_name)` — SPY + XLK on same panel"}
+plot_regime_overlay(spy_ret, asset_name = "SPY",
+                    overlay_ret  = xts_ret[, "XLK"],
+                    overlay_name = "XLK")
+```
+
+### plot_regime_stats
+
+<div class="fn-box">plot_regime_stats(xts_ret_col, t_fall=0.10, asset_name="SPY")</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime.R</span>
+
+Two-panel bar chart: avg return per regime (left) and avg duration in days (right).
+
+```{r pd-regime-stats, fig.height=5, fig.cap="**Fig 1.3** `plot_regime_stats(spy_ret)` — avg return and duration per regime"}
+plot_regime_stats(spy_ret, asset_name = "SPY")
+```
+
+### plot_regime_overlay_ext
+
+<div class="fn-box">plot_regime_overlay_ext(ticker, bmk="SPY", xts_ret, t_fall=0.10)</div>
+<span class="file-tag">key_plots/chart_regime_rel_overlay.R</span>
+
+Four-panel stacked: BMK cumret + ticker cumret + per-regime rel bar strip + relative cumulative area. Regime defined by BMK drawdown.
+
+```{r pd-regime-overlay-ext, fig.height=9, fig.cap="**Fig 1.4** `plot_regime_overlay_ext('XLK', bmk='SPY', xts_ret)` — 4-panel: BMK + ticker + rel bar strip + rel area"}
+plot_regime_overlay_ext("XLK", bmk = "SPY", xts_ret = xts_ret)
+```
+
+### plot_regime_triple
+
+<div class="fn-box">plot_regime_triple(ticker, bmk="SPY", xts_ret, t_fall=0.10, roll_win=252)</div>
+<span class="file-tag">key_plots/chart_regime_rel_overlay.R</span>
+
+Two-panel: top — BMK (red) + ticker (dark blue) + relative cumulative return (grey) on one shared y-axis with three regime bar strips; bottom — rolling `roll_win`-day relative return ribbon (green = outperform, red = underperform) with regime shading and current 12m α label.
+
+```{r pd-regime-triple, fig.height=9, fig.cap="**Fig 1.5** `plot_regime_triple('XLK', bmk='SPY', xts_ret)` — top: cumret triple + bar strips; bottom: rolling 12m relative return"}
+plot_regime_triple("XLK", bmk = "SPY", xts_ret = xts_ret)
+```
+
+---
+
+## 2 · Regime Alpha
+
+### plot_regime_rel_summary
+
+<div class="fn-box">plot_regime_rel_summary(xts_ret, tickers, master="SPY", t_fall=0.10)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime_rel.R</span>
+
+Faceted bar chart: avg return per ticker per regime, SPY bar = absolute, all others = alpha vs SPY.
+
+```{r pd-rel-summary, fig.height=7, fig.cap="**Fig 2.1** `plot_regime_rel_summary(xts_ret, sector_tickers)` — avg return per ticker per regime, SPY=abs others=alpha"}
+plot_regime_rel_summary(xts_ret, sector_tickers, master = "SPY")
+```
+
+### plot_regime_rel_heatmap
+
+<div class="fn-box">plot_regime_rel_heatmap(xts_ret, tickers, master="SPY", t_fall=0.10)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime_rel.R</span>
+
+Heatmap: rows = regime episodes, columns = tickers, fill = alpha vs SPY (green/red). SPY column = absolute return.
+
+```{r pd-rel-heatmap, fig.height=7, fig.cap="**Fig 2.2** `plot_regime_rel_heatmap(xts_ret, sector_tickers)` — episodes × tickers heatmap, green=alpha>0"}
+plot_regime_rel_heatmap(xts_ret, sector_tickers, master = "SPY")
+```
+
+### plot_abs_alpha_regime
+
+<div class="fn-box">plot_abs_alpha_regime(xts_ret, tickers, rt, master="SPY", title=NULL)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime_rel.R</span>
+
+Grouped vertical bars: avg absolute return AND avg alpha side by side per regime type.
+
+```{r pd-abs-alpha, fig.height=5, fig.cap="**Fig 2.3** `plot_abs_alpha_regime(xts_ret, sector_tickers, rt)` — grouped bars: abs return vs alpha by regime"}
+plot_abs_alpha_regime(xts_ret, sector_tickers, rt = rt,
+                      title = "US Sectors — Abs Return vs \u03b1 by Regime")
+```
+
+### plot_fall_fingerprint
+
+<div class="fn-box">plot_fall_fingerprint(xts_ret, tickers, rt=NULL, master="SPY", title=NULL)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime_rel.R</span>
+
+Strip plot: one dot per Fall episode per ticker, mean diamond + ±1SD bar. Fall only.
+
+```{r pd-fall-fp, fig.height=6, fig.cap="**Fig 2.4** `plot_fall_fingerprint(xts_ret, sector_tickers, rt)` — per-episode alpha in Fall, mean diamond + SD bar"}
+plot_fall_fingerprint(xts_ret, sector_tickers, rt = rt,
+                      title = "US Sectors — Fall Fingerprint")
+```
+
+### plot_regime_fingerprint
+
+<div class="fn-box">plot_regime_fingerprint(xts_ret, tickers, rt=NULL, master="SPY", title=NULL)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime_rel.R</span>
+
+Strip plot across full cycle: three facets (Fall / Recovery / Consolidation).
+
+```{r pd-fp-strip, fig.height=7, fig.cap="**Fig 2.5** `plot_regime_fingerprint(xts_ret, sector_tickers, rt)` — strip plot across full cycle, 3 facets"}
+plot_regime_fingerprint(xts_ret, sector_tickers, rt = rt,
+                        title = "US Sectors — Full Cycle Fingerprint")
+```
+
+### plot_regime_fingerprint_box
+
+<div class="fn-box">plot_regime_fingerprint_box(xts_ret, tickers, rt=NULL, master="SPY", title=NULL)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime_rel.R</span>
+
+Boxplot version: green fill = median alpha > 0, red = median alpha < 0. Three facets.
+
+```{r pd-fp-box, fig.height=7, fig.cap="**Fig 2.6** `plot_regime_fingerprint_box(xts_ret, sector_tickers, rt)` — boxplot, green=median alpha>0"}
+plot_regime_fingerprint_box(xts_ret, sector_tickers, rt = rt,
+                             title = "US Sectors — Full Cycle Fingerprint (Boxplot)")
+```
+
+### plot_regime_sync
+
+<div class="fn-box">plot_regime_sync(xts_ret, tickers, t_fall=0.10, title=NULL)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime.R</span>
+
+Regime synchronisation heatmap: each row = one ticker's own Fall/Recovery/Consolidation cycle. SPY at top as reference.
+
+```{r pd-sync, fig.height=6, fig.cap="**Fig 2.7** `plot_regime_sync(xts_ret, sector_tickers)` — each ticker's own regime timeline, SPY reference at top"}
+plot_regime_sync(xts_ret, sector_tickers,
+                 title = "US Sectors — Regime Sync (own cycle)")
+```
+
+### plot_regime_multi_overlay
+
+<div class="fn-box">plot_regime_multi_overlay(xts_ret, tickers, master="SPY", relative=FALSE)</div>
+<span class="file-tag">scripts_spy_dd_regime/regime_multi_ticker.R</span>
+
+SPY regime chart at top, all tickers stacked below as cumulative return bars. Set `relative=TRUE` for alpha bars.
+
+```{r pd-multi-overlay, fig.height=9, fig.cap="**Fig 2.8** `plot_regime_multi_overlay(xts_ret, sector_tickers)` — SPY at top, all tickers stacked below"}
+plot_regime_multi_overlay(xts_ret, sector_tickers, master = "SPY", relative = FALSE)
+```
+
+### plot_regime_ticker_heatmap
+
+<div class="fn-box">plot_regime_ticker_heatmap(xts_ret, tickers, master="SPY", relative=FALSE)</div>
+<span class="file-tag">scripts_spy_dd_regime/regime_multi_ticker.R</span>
+
+Heatmap: rows = tickers, columns = regime periods. Fill = cumulative return per episode.
+
+```{r pd-ticker-heatmap, fig.height=6, fig.cap="**Fig 2.9** `plot_regime_ticker_heatmap(xts_ret, sector_tickers, relative=TRUE)` — tickers × episodes, fill=alpha"}
+plot_regime_ticker_heatmap(xts_ret, sector_tickers, master = "SPY", relative = TRUE)
+```
+
+---
+
+## 3 · State Machine
+
+### plot_sm_diagram
+
+<div class="fn-box">plot_sm_diagram(xts_ret, master="SPY", t_fall=0.10)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_statemachine_diagram_rel.R</span>
+
+Triangle state machine: 3 nodes (Fall / Recovery / Consolidation) with regime stats + empirical transition probabilities on arrows.
+
+```{r pd-sm-diagram, fig.height=7, fig.cap="**Fig 3.1** `plot_sm_diagram(xts_ret, master='SPY')` — triangle state machine with transition probabilities"}
+plot_sm_diagram(xts_ret, master = "SPY", t_fall = 0.10)
+```
+
+### plot_sm_alpha_heatmap
+
+<div class="fn-box">plot_sm_alpha_heatmap(xts_ret, tickers, master="SPY", t_fall=0.10)</div>
+<span class="file-tag">scripts_spy_dd_regime/spy_statemachine_diagram_rel.R</span>
+
+Heatmap: avg alpha per ticker × regime type. Rows ranked by Fall alpha.
+
+```{r pd-sm-alpha, fig.height=6, fig.cap="**Fig 3.2** `plot_sm_alpha_heatmap(xts_ret, sector_tickers)` — avg alpha per ticker × regime type"}
+plot_sm_alpha_heatmap(xts_ret, sector_tickers, master = "SPY")
+```
+
+---
+
+## 4 · Pair Analysis
+
+### plot_xts_pair
+
+<div class="fn-box">plot_xts_pair(xts1, xts2, label1, label2, roll_cor_win=250, regime_tbl=NULL)</div>
+<span class="file-tag">utility/plot_xts_pair.R</span>
+
+Three-panel: cumulative wealth comparison, spread wealth, running drawdowns. Regime shading optional.
+
+```{r pd-xts-pair, fig.height=8, fig.cap="**Fig 4.1** `plot_xts_pair(xts_ret[,'SPY'], xts_ret[,'XLK'])` — cumulative wealth, spread, and drawdowns"}
+plot_xts_pair(xts_ret[, "SPY"], xts_ret[, "XLK"],
+              label1 = "SPY", label2 = "XLK",
+              regime_tbl = rt)
+```
+
+---
+
+## 5 · Exante Hypothesis
+
+### plot_exante_quadrant
+
+<div class="fn-box">plot_exante_quadrant(exante_tbl, horizon_sel="full", label_n=6, color_by="role")</div>
+<span class="file-tag">scripts_exante_hypothesis/exante_visuals.R</span>
+
+2×2 scatter: x = volatility vs BMK, y = return vs BMK. Quadrants = Enhancer / Stabilizer / Drag / Mixed. Bubble size = weight in SAA.
+
+```{r pd-exante-quad, fig.height=8, fig.cap="**Fig 5.1** `plot_exante_quadrant(exante_tbl)` — 2x2 Enhancer/Stabilizer classification scatter"}
+exante_tbl <- build_exante_metrics(xts_ret, bmk = "SPY") %>%
+  enrich_with_metadata(etf_metadata)
+plot_exante_quadrant(exante_tbl)
+```
+
+### plot_corr_dd
+
+<div class="fn-box">plot_corr_dd(exante_tbl, horizon_sel="full", label_n=8, show_loess=TRUE)</div>
+<span class="file-tag">scripts_exante_hypothesis/exante_visuals.R</span>
+
+Anti-diversification core chart: x = correlation to BMK, y = MaxDD cost of adding ticker. Low-ρ tickers often have worse DD.
+
+```{r pd-corr-dd, fig.height=7, fig.cap="**Fig 5.2** `plot_corr_dd(exante_tbl)` — anti-diversification: correlation vs MaxDD cost"}
+plot_corr_dd(exante_tbl)
+```
+
+---
+
+## 6 · SAA Portfolio
+
+### plot_saa_ggbar + plot_saa_treemap
+
+<div class="fn-box">plot_saa_ggbar(portfolio=SAA_PORTFOLIO, xts_ret=NULL)</div>
+<div class="fn-box">plot_saa_treemap(portfolio=SAA_PORTFOLIO, xts_ret=NULL)</div>
+<span class="file-tag">scripts_saa_taa/saa_tree.R</span>
+
+Always shown as a pair. Ggbar = horizontal stacked bar. Treemap = area proportional to weight, colour = YTD sign.
+
+```{r pd-saa, fig.height=4, fig.cap="**Fig 6.1** `plot_saa_ggbar() / plot_saa_treemap()` — SAA allocation bar and treemap (always shown as pair)"}
+plot_saa_ggbar(xts_ret = xts_ret) / plot_saa_treemap(xts_ret = xts_ret)
+```
+
+---
+
+## 7 · DAA Framework
+
+### plot_multi_wealth_endlabel
+
+<div class="fn-box">plot_multi_wealth_endlabel(ret_list, rt, colours=NULL, labels=NULL)</div>
+<span class="file-tag">key_plots/chart_multi_wealth_endlabel.R</span>
+
+2–5 portfolio wealth comparison. Direct end-of-line labels with ann return. Regime shading. No legend.
+
+```{r pd-wealth, fig.height=6, fig.cap="**Fig 7.1** `plot_multi_wealth_endlabel(ret_list, rt)` — 2-5 portfolio wealth with end-of-line labels"}
+plot_multi_wealth_endlabel(
+  ret_list = list(SPY = xts_ret[, "SPY"],
+                  GLD = xts_ret[, "GLD"],
+                  AGG = xts_ret[, "AGG"]),
+  rt = rt
+)
+```
+
+### plot_ma200_signal_panel
+
+<div class="fn-box">plot_ma200_signal_panel(trend_signals_tbl, saa_tbl, tqs=NULL)</div>
+<span class="file-tag">key_plots/chart_ma200_signal_panel.R</span>
+
+Per-ticker price + 200DMA grid. Red shading = trend OFF. Rebased to 100. Two-column patchwork layout.
+
+```{r pd-ma200, fig.height=10, fig.cap="**Fig 7.2** `plot_ma200_signal_panel(trend_signals, saa_tbl)$eq` — per-ticker price + 200DMA grid, red=trend OFF"}
+trend_signals <- xts_ret %>%
+  fortify.zoo() %>% rename(date = Index) %>%
+  pivot_longer(-date, names_to = "symbol", values_to = "ret") %>%
+  group_by(symbol) %>% arrange(date) %>%
+  mutate(
+    adjusted = cumprod(1 + ret) * 100,
+    ma200    = as.numeric(stats::filter(adjusted, rep(1/200, 200), sides = 1)),
+    signal   = as.integer(!is.na(ma200) & adjusted >= ma200)
+  ) %>% ungroup()
+
+# SAA_CONFIG has saa_bucket; SAA_PORTFOLIO has weight — join both
+saa_tbl_ma200 <- SAA_CONFIG %>%
+  left_join(SAA_PORTFOLIO %>% select(ticker, weight), by = "ticker") %>%
+  mutate(weight = coalesce(weight, 0.05))
+
+plot_ma200_signal_panel(trend_signals, saa_tbl_ma200)$eq
+```
+
+---
+
+## 8 · Market Context
+
+### plot_pe_bands
+
+<div class="fn-box">plot_pe_bands(n_years=10, dark=TRUE, force_refresh=FALSE)</div>
+<span class="file-tag">key_plots/chart_pe_bands.R</span>
+
+Bloomberg-style S&P 500 P/E price bands. Five colour bands (Avg ±1SD / ±2SD) vs actual price. Data auto-downloaded and cached.
+
+```{r pd-pe, fig.height=7, fig.cap="**Fig 8.1** `plot_pe_bands()` — Bloomberg-style S&P 500 P/E price bands"}
+plot_pe_bands()
+```
+
+### plot_shiller_cape
+
+<div class="fn-box">plot_shiller_cape()</div>
+<span class="file-tag">key_plots/chart_pe_bands.R</span>
+
+Shiller CAPE (P/E10) since 1950. Orange = CAPE, purple dashed = long-run avg, red/blue = ±1σ / ±2σ.
+
+```{r pd-cape, fig.height=6, fig.cap="**Fig 8.2** `plot_shiller_cape()` — Shiller CAPE since 1950, ±1σ/±2σ bands"}
+plot_shiller_cape()
+```
+
+### plot_calendar_heatmap
+
+<div class="fn-box">plot_calendar_heatmap(ticker="SPY", n_yr=5)</div>
+<span class="file-tag">key_plots/calendar_heatmap.R</span>
+
+Calendar grid: each cell = one trading day, fill = log return. Red = down, blue = up.
+
+```{r pd-cal-heatmap, fig.height=9, fig.cap="**Fig 8.3** `plot_calendar_heatmap('SPY', n_yr=5)` — daily return calendar grid, red=down blue=up"}
+plot_calendar_heatmap("SPY", n_yr = 5)
+```
+
+### plot_calendar_analog
+
+<div class="fn-box">plot_calendar_analog(xts_col, rt=NULL)</div>
+<span class="file-tag">utility/plot_calendar_analog.R</span>
+
+Current year vs analog years (similar YTD path). Grey = all years, blue = analogs, red = current, shaded cone = 10–90th pct forward.
+
+```{r pd-analog, fig.height=7, fig.cap="**Fig 8.4** `plot_calendar_analog(xts_ret[,'SPY'], rt)` — current year vs analog years, forward cone"}
+plot_calendar_analog(xts_ret[, "SPY"], rt = rt)
+```
+
+---
+
+## 9 · Calendar Performance
+
+### plot_calendar_perf
+
+<div class="fn-box">plot_calendar_perf(xts_col, title=NULL)</div>
+<span class="file-tag">utility/plot_calendar_perf.R</span>
+
+Monthly/annual heatmap of calendar returns. Rows = years, columns = months + full-year total.
+
+```{r pd-cal-perf, fig.height=6, fig.width=11, fig.cap="**Fig 9.1** `plot_calendar_perf(xts_ret[,'SPY'])` — monthly/annual return heatmap"}
+plot_calendar_perf(xts_ret[, "SPY"])
+```
+
+### plot_multi_calendar_perf
+
+<div class="fn-box">plot_multi_calendar_perf(xts_multi, title=NULL)</div>
+<span class="file-tag">utility/plot_calendar_perf.R</span>
+
+Multi-ticker stacked calendar heatmaps. One panel per ticker.
+
+```{r pd-multi-cal, fig.height=12, fig.width=11, fig.cap="**Fig 9.2** `plot_multi_calendar_perf(xts_ret[, c('SPY','GLD','AGG')])` — stacked calendar heatmaps per ticker"}
+plot_multi_calendar_perf(xts_ret[, c("SPY", "GLD", "AGG")])
+```
+
+### plot_rel_calendar_perf
+
+<div class="fn-box">plot_rel_calendar_perf(ticker, xts_ret, xts_rel, bmk_label="SPY")</div>
+<span class="file-tag">utility/plot_calendar_perf.R</span>
+
+Relative calendar: each cell = ticker monthly return minus BMK monthly return (alpha). Green = outperform, red = underperform.
+
+```{r pd-rel-cal, fig.height=6, fig.width=11, fig.cap="**Fig 9.3** `plot_rel_calendar_perf('XLK', xts_ret, xts_rel)` — monthly alpha vs SPY calendar"}
+plot_rel_calendar_perf("XLK", xts_ret = xts_ret, xts_rel = xts_rel)
+```
+
+---
+
+*Last updated: `r Sys.Date()` | Source: `Rmd/plot_directory.Rmd`*

@@ -1,0 +1,1221 @@
+---
+title: "KF3 — When Winners Become Losers"
+subtitle: "Trend Reversal in Cross-Sectional Relative Momentum"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+  pdf_document:
+    toc: true
+    latex_engine: xelatex
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 12,
+  fig.height = 7
+)
+
+library(tidyverse)
+library(xts)
+library(scales)
+library(patchwork)
+library(kableExtra)
+library(here)
+
+# Source the KF3 engine — computes all objects; the knitr guard suppresses
+# auto-printing so plots are fully controlled by this report.
+source(here("key_findings/kf3_trend_reversal.R"))
+
+# ── Table helper — dark-grey scaffolding applied to every table ───────────────
+ktable <- function(x, caption = NULL, ...) {
+  tbl <- knitr::kable(x, caption = caption, ...)
+  if (knitr::is_html_output()) {
+    tbl %>%
+      kable_styling(
+        bootstrap_options = c("striped", "hover", "condensed"),
+        full_width        = TRUE,
+        font_size         = 13,
+        html_font         = "inherit"
+      ) %>%
+      row_spec(0,
+               background = "#3d3d3d",
+               color      = "white",
+               bold       = TRUE)
+  } else {
+    tbl %>%
+      kable_styling(
+        latex_options = c("striped", "hold_position", "scale_down"),
+        full_width    = TRUE,
+        font_size     = 10,
+        stripe_color  = "#f0f0f0"
+      ) %>%
+      row_spec(0,
+               bold       = TRUE,
+               background = "#3d3d3d",
+               color      = "white")
+  }
+}
+```
+
+---
+
+## 1. The Problem in Plain English
+
+Imagine a simple rule for picking ETFs: *"buy whatever has gone up the most
+over the past three months."* This is the core idea behind **momentum** — assets
+that have recently outperformed tend to keep outperforming, at least in the
+short term. It works surprisingly well most of the time.
+
+But there is a well-known trap: **the strategy fails catastrophically at turning
+points.** At the moment when the market stops falling and starts recovering, the
+ETFs that looked like "winners" during the downturn (gold, government bonds,
+defensive equities) suddenly become the worst performers — not because anything
+changed about those ETFs, but because the *context* changed.
+
+This report measures that phenomenon precisely and asks:
+
+> **Are winner-to-loser reversals predictable from the market regime, or do they
+> happen randomly?**
+
+If reversals cluster at regime transitions, then a smart TAA framework can
+*anticipate* them — rather than getting caught holding yesterday's winners.
+
+---
+
+## 2. Building Blocks: Three Concepts You Need
+
+### 2.1 Relative Return — What We Actually Measure
+
+Rather than asking "did this ETF go up?", we ask:
+**"Did this ETF go up *more than SPY*?"**
+
+This is called a **relative return**:
+
+$$r^{\text{rel}}_{i,t} = r^{\text{ETF}}_{i,t} - r^{\text{SPY}}_t$$
+
+A positive relative return means the ETF *outperformed* SPY that day.
+A negative relative return means it *underperformed*, even if it gained in
+absolute terms.
+
+Why use relative returns? Because we want to separate **skill** (beating the
+market) from **beta** (just riding the market wave). Gold going up 1% on a day
+SPY goes up 2% is actually underperformance.
+
+### 2.2 Cross-Sectional Rank — Who Is Winning Right Now?
+
+At every weekly rebalance date, we compute the **60-day cumulative relative
+return** for every ticker in the universe. Then we rank all tickers from worst
+(rank 1) to best (rank N) and divide into five equal buckets called
+**quintiles**:
+
+| Quintile | Label | Who is here |
+|:---:|:---:|---|
+| Q5 | **Winner** | Top 20% — highest 60-day relative return |
+| Q4 | Above average | Next 20% |
+| Q3 | Middle | Middle 20% |
+| Q2 | Below average | Next 20% |
+| Q1 | **Loser** | Bottom 20% — lowest 60-day relative return |
+
+This ranking is done **cross-sectionally** — every ticker is judged against
+every other ticker at the same point in time, not against its own history.
+
+> **Noise reduction step**: before ranking, returns are *winsorised* at the 1%
+> tails. This means one extreme event (e.g. a flash crash in a small ETF) cannot
+> artificially push that ticker into Q1 or Q5 and contaminate the entire ranking.
+
+### 2.3 Persistent Cohorts and Reversal Events
+
+A single week in Q5 is noise. A ticker that stays in Q5 for **three or more
+consecutive weeks** is a **persistent winner** — the signal is real and stable.
+
+A **reversal event** is defined as:
+
+1. A ticker was a *persistent winner* (Q5 for ≥ 3 weeks).
+2. It exited that state.
+3. Within the next **8 weeks**, it entered the *persistent loser* state (Q1 for ≥ 3 weeks).
+
+We call this a **W→L** (winner-to-loser) event. The mirror image — a persistent
+loser becoming a persistent winner — is an **L→W** event.
+
+```{r params-table, echo=FALSE}
+tibble(
+  Parameter       = c("Rebalance cadence", "Formation window",
+                      "Persistence threshold", "Transition window"),
+  Symbol          = c("REBAL_FREQ", "LOOKBACK", "PERSIST_N", "TRANSIT_WIN"),
+  Value           = c("5 trading days (weekly)", "60 trading days (~3 months)",
+                      "≥ 3 consecutive weeks", "≤ 8 weeks"),
+  `Why this value` = c(
+    "Daily changes are too noisy; monthly misses fast moves",
+    "Long enough to capture a trend; short enough to react to reversals",
+    "Filters out one-week flukes while still being timely",
+    "Regime transitions typically play out over 6–8 weeks"
+  )
+) %>%
+  ktable(caption = "Analysis parameters and rationale")
+```
+
+---
+
+## 3. The Data Snapshot
+
+```{r data-snapshot}
+n_events_wl <- sum(reversals$reversal_type == "W\u2192L")
+n_events_lw <- sum(reversals$reversal_type == "L\u2192W")
+n_tickers   <- n_distinct(reversals$ticker)
+date_range  <- range(index(xts_rel))
+
+tibble(
+  Metric  = c("Universe size", "Analysis period",
+              "Rebalance dates", "W→L reversal events", "L→W reversal events",
+              "Tickers involved in at least one reversal"),
+  Value   = c(
+    paste(length(universe), "tickers"),
+    paste(format(date_range[1], "%b %Y"), "to", format(date_range[2], "%b %Y")),
+    as.character(length(reb_dates)),
+    as.character(n_events_wl),
+    as.character(n_events_lw),
+    as.character(n_tickers)
+  )
+) %>%
+  ktable(caption = "Dataset overview")
+```
+
+---
+
+## 4. Plot A — The Quintile Transition Matrix
+
+### What Is This Plot?
+
+Think of it as a **probability table of cohort stickiness**. For every ticker
+at every rebalance date, we ask: *"what quintile was it in last week, and what
+quintile is it in this week?"*
+
+The matrix shows the percentage of times each transition occurred. For example,
+the cell at row Q5, column Q5 answers: *"if a ticker was in Q5 last week, what
+is the probability it is still in Q5 this week?"*
+
+**How to read it:**
+
+- **High diagonal values** → **momentum**: tickers tend to stay where they are.
+  This is a healthy sign — it means the 60-day rank is stable and not just noise.
+- **High off-diagonal values in the extreme corners** (Q5→Q1 or Q1→Q5) →
+  **mean reversion**: tickers frequently flip from one extreme to the other.
+- **High off-diagonal values near the diagonal** (Q5→Q4 or Q1→Q2) →
+  **gradual drift**: tickers migrate slowly through quintiles.
+
+```{r plot-A, fig.height=6.5, fig.cap="KF3-A: Quintile Transition Matrix. Diagonal cells (darker blue) show persistence — how often a ticker stays in the same quintile from one week to the next. Off-diagonal cells show rotation."}
+print(p_A)
+```
+
+### What to Look For
+
+> **The key number is the Q5→Q5 cell** (top-left of the matrix). A value above
+> 50% confirms that momentum is *real* — winners tend to remain winners week to
+> week. A value near 20% (random expectation) would mean the rank carries no
+> information.
+
+> **The Q5→Q1 and Q1→Q5 cells** (extreme off-diagonal corners) measure the
+> *severity* of reversals — how often a ticker jumps directly from the top to the
+> bottom quintile (or vice versa) in a single week. These are the most disruptive
+> transitions for a momentum strategy.
+
+---
+
+## 5. Plot B — When Do Reversals Happen?
+
+### The Regime Hypothesis
+
+The central question of this analysis is whether reversal events are
+**uniformly distributed across time**, or whether they **cluster at specific
+market regimes**.
+
+Our three regimes are defined by SPY's drawdown from its most recent peak:
+
+| Regime | Definition | Typical character |
+|:---:|---|---|
+| **Fall** | SPY drawdown ≥ 10% | Risk-off: bonds and gold outperform equities |
+| **Recovery** | SPY rebounding from a Fall | Risk-on: equities roar back, defensives lag |
+| **Consolidation** | Everything else | Range-bound, mixed signals |
+
+The hypothesis is:
+
+> **W→L events should cluster in Fall and at the Fall→Recovery transition.**
+> Gold (GLD) and bonds (IEF, TLT) are *persistent winners* during Fall — they
+> rise while SPY falls. The moment Recovery begins, they become *laggards*
+> relative to SPY. This is not a fundamental change — it is a pure regime effect.
+
+> **L→W events should cluster in Recovery.**
+> High-beta tickers (SMH, XLK, QQQ) are *persistent losers* during Fall — they
+> fall harder than SPY. The moment Recovery begins, they rebound faster than SPY
+> and flip to persistent winners.
+
+```{r plot-B, fig.height=6, fig.cap="KF3-B: Reversal event count by market regime. If the hypothesis holds, W→L events (red) will dominate in Fall, and L→W events (dark blue) will dominate in Recovery."}
+print(p_B)
+```
+
+### Interpreting the Result
+
+```{r regime-table}
+reversals %>%
+  count(reversal_type, regime_at_exit) %>%
+  mutate(
+    regime_at_exit = factor(regime_at_exit,
+                            levels = c("Fall", "Recovery", "Consolidation"))
+  ) %>%
+  arrange(reversal_type, regime_at_exit) %>%
+  pivot_wider(names_from = regime_at_exit, values_from = n, values_fill = 0) %>%
+  rename(`Reversal type` = reversal_type) %>%
+  ktable(caption = "Reversal event count by regime and type")
+```
+
+> **Key insight:** If W→L events are over-represented in Fall compared to
+> Consolidation, it means the TAA framework should *discount* trailing winners
+> during Fall episodes — they are likely HEDGE tickers that will reverse once
+> SPY bottoms out.
+
+---
+
+## 6. Plot C — Do Reversals Predict Future Returns?
+
+### Why Forward Returns Matter
+
+Detecting reversals in hindsight is interesting. But a trading strategy needs
+to know: **after a reversal event is confirmed, does the new direction persist?**
+
+Plot C measures the **forward relative return** of the ticker in the 20 and 63
+trading days *after* the reversal `entry_date` (the first week of the new
+persistent state).
+
+- **After a W→L event**: a useful signal would show *negative* forward relative
+  returns — the ticker keeps underperforming SPY.
+- **After an L→W event**: a useful signal would show *positive* forward relative
+  returns — the ticker keeps outperforming SPY.
+
+If the distributions are centred on zero with no asymmetry, the reversal signal
+carries no predictive power — it simply described what already happened.
+
+```{r plot-C, fig.height=7, fig.cap="KF3-C: Forward relative return (vs SPY) in the 20 and 63 trading days after each reversal event. Diamond = mean. Box = interquartile range. A signal is useful if W→L median is negative and L→W median is positive."}
+print(p_C)
+```
+
+### Signal Strength Summary
+
+```{r forward-return-table}
+fwd_returns %>%
+  filter(!is.na(fwd_rel_ret)) %>%
+  group_by(`Reversal type` = reversal_type, `Window` = window) %>%
+  summarise(
+    `N events`        = n(),
+    `Median fwd ret`  = percent(median(fwd_rel_ret, na.rm = TRUE), accuracy = 0.1),
+    `Mean fwd ret`    = percent(mean(fwd_rel_ret,   na.rm = TRUE), accuracy = 0.1),
+    `% directionally correct` = percent(
+      mean(if_else(reversal_type == "W\u2192L",
+                   fwd_rel_ret < 0,
+                   fwd_rel_ret > 0), na.rm = TRUE),
+      accuracy = 1
+    ),
+    .groups = "drop"
+  ) %>%
+  ktable(
+    caption = paste0(
+      "Forward return statistics post-reversal. ",
+      "'% directionally correct' = fraction of events where the post-reversal ",
+      "return confirmed the reversal direction."
+    )
+  )
+```
+
+> **Reading the table:** A median W→L forward return of, say, −3% over 63 days
+> means that on average, a winner that flipped to a loser continued to
+> underperform SPY by 3% in the following quarter. A "% directionally correct"
+> above 55% is economically meaningful for a momentum signal.
+
+---
+
+## 7. Which Tickers Reverse Most Often?
+
+Not all tickers reverse at the same rate. The table below shows the most
+frequent "reversal offenders" — tickers that repeatedly cycle between winner
+and loser status. These are the tickers where a naive trailing-return TAA
+screen is most likely to mislead you.
+
+```{r top-reversals}
+reversals %>%
+  count(ticker, reversal_type, asset_class) %>%
+  arrange(desc(n)) %>%
+  head(24) %>%
+  pivot_wider(names_from = reversal_type, values_from = n, values_fill = 0L) %>%
+  rename(
+    Ticker       = ticker,
+    `Asset class` = asset_class
+  ) %>%
+  arrange(desc(rowSums(across(where(is.integer))))) %>%
+  ktable(caption = "Top 24 tickers by total reversal event count")
+```
+
+---
+
+## 8. Implications for the TAA Framework
+
+### The Regime-Conditional Momentum Rule
+
+This analysis supports a simple amendment to the standard trailing-return rank:
+
+> **Within a Fall regime:** penalise HEDGE tickers (GLD, IEF, TLT) in the
+> ranking. Their Q5 position is *mechanically inflated* by the regime — it will
+> reverse the moment SPY bottoms. Prefer tickers that are winners for
+> *fundamental* reasons (earnings growth, sector rotation) rather than
+> regime-flight reasons.
+
+> **At the Fall→Recovery transition:** the L→W signal is actionable. Tickers
+> that have been persistent Q1 losers during Fall — especially high-beta growth
+> and cyclical ETFs — are likely to be the strongest performers in the first
+> 8–12 weeks of Recovery.
+
+> **In Consolidation:** the momentum signal is most reliable. The transition
+> matrix diagonal will be highest here, and reversals are least frequent.
+> Standard trailing-return ranking applies without a regime overlay.
+
+### Connecting to KF1 and KF2
+
+| Finding | Core lesson | TAA implication |
+|---|---|---|
+| **KF1** (anti-diversification) | Low-ρ tickers don't reduce drawdown as expected | Don't add GLD/IEF *just* because ρ ≈ 0 |
+| **KF2** (L/S pair screen) | Only high-ρ tickers are valid SPY substitutes | ρ > 0.75 is a hard prerequisite for L/S |
+| **KF3** (trend reversal) | Momentum rankings reverse at regime transitions | Apply regime-conditional discount to winner scores in Fall |
+
+Together, these three findings argue for the same conclusion from different
+angles: **the naive cross-sectional momentum signal should always be
+regime-adjusted before being used in a TAA allocation.**
+
+---
+
+## 9. Equity-Only Universe — Removing the Hedge-ETF Contamination
+
+### The Problem with Mixing Asset Classes
+
+The full-universe analysis (Sections 4–7) includes every ETF in the Sovereign
+Universe — equities, bonds, gold, real estate, and currencies. This creates a
+structural contamination problem.
+
+Consider what happens during a **Fall** regime: SPY drops 15%. On the same days,
+GLD rises 8% and IEF rises 5%. Both become **Q5 persistent winners** — but for
+entirely the wrong reason. Their outperformance is not driven by any inherent
+sector momentum or company earnings. It is driven purely by their **negative or
+zero correlation to SPY** — a mechanical, beta-driven response to the regime.
+
+These tickers have no **eigen-move**: they do not possess an independent price
+driver. Their daily movement is essentially a *derivative* of SPY's move,
+reflected across zero. When the regime flips from Fall to Recovery, their
+relative return mechanically reverses — not because anything changed about gold
+or bonds, but because the SPY beta flip reversed.
+
+> **The consequence:** in the full universe, most W→L events involving GLD, IEF,
+> and TLT are *not real momentum reversals*. They are regime beta flips dressed
+> up as reversal signals. Mixing them with genuine equity sector momentum
+> produces a noisy, misleading rank.
+
+### The Equity-Only Solution
+
+By restricting the cross-sectional rank to **Equity ETFs only**, we remove the
+mechanically inflated winners. The rank now reflects only genuine **sector and
+factor rotation** — the kind of momentum a TAA screen should capture.
+
+```{r eq-universe-snapshot}
+tibble(
+  Metric  = c("Equity tickers in universe",
+              "W→L reversal events (equity only)",
+              "L→W reversal events (equity only)",
+              "Tickers involved in at least one reversal"),
+  Value   = c(
+    as.character(length(universe_eq)),
+    as.character(sum(reversals_eq$reversal_type == "W\u2192L")),
+    as.character(sum(reversals_eq$reversal_type == "L\u2192W")),
+    as.character(n_distinct(reversals_eq$ticker))
+  )
+) %>%
+  ktable(caption = "Equity-only sub-universe overview")
+```
+
+### Plot A (Equity) — Does Momentum Persist Differently?
+
+The key comparison with the full-universe transition matrix is the **diagonal**.
+Within equity-only, all tickers share the same SPY beta direction — they all
+tend to fall together in Fall and rise together in Recovery. This removes the
+artificial Q5 persistence that hedge ETFs gain simply by not falling when SPY
+falls.
+
+If the equity-only diagonal is **weaker** than the full universe diagonal, it
+confirms that much of the apparent momentum in the full universe was driven by
+asset-class separation (equities vs bonds), not genuine sector momentum.
+
+If the equity-only diagonal is **stronger**, it reveals that within equities,
+genuine sector momentum persists even after removing the hedge-ETF tailwind.
+
+```{r plot-A-eq, fig.height=6.5, fig.cap="KF3-A (Equity Only): Quintile Transition Matrix restricted to equity ETFs. Compare the Q5→Q5 diagonal cell to the full-universe version — any reduction reflects the removal of mechanically persistent hedge ETF winners."}
+print(p_A_eq)
+```
+
+### Plot B (Equity) — Regime Timing of Reversals, Cleaned Up
+
+With hedge ETFs removed, the W→L and L→W signals in Plot B should become
+*sharper and more actionable*:
+
+- **Fall regime** W→L events now represent genuine equity sector leaders that
+  ran out of momentum — not gold rotating back to bonds.
+- **Recovery regime** L→W events now capture the rotation from defensive
+  sectors (XLV, XLP) into growth and cyclicals (XLK, SMH, XLY) — a
+  well-documented and exploitable pattern.
+
+```{r plot-B-eq, fig.height=6, fig.cap="KF3-B (Equity Only): Reversal event count by regime, restricted to equity ETFs. The hedge-ETF mechanical reversals are removed — remaining signals reflect genuine sector rotation."}
+print(p_B_eq)
+```
+
+```{r regime-table-eq}
+reversals_eq %>%
+  count(reversal_type, regime_at_exit) %>%
+  mutate(regime_at_exit = factor(regime_at_exit,
+                                 levels = c("Fall", "Recovery", "Consolidation"))) %>%
+  arrange(reversal_type, regime_at_exit) %>%
+  pivot_wider(names_from = regime_at_exit, values_from = n, values_fill = 0L) %>%
+  rename(`Reversal type` = reversal_type) %>%
+  ktable(caption = "Equity-only reversal count by regime and type")
+```
+
+### Plot C (Equity) — Is the Forward Return Signal Cleaner?
+
+This is the most important comparison. If the forward return signal (directional
+accuracy, median forward return) is **stronger** in the equity-only universe,
+it confirms the hypothesis: hedge ETFs were adding noise, not signal.
+
+A cleaner forward return distribution means:
+- W→L events are more reliably followed by continued underperformance
+- L→W events are more reliably followed by continued outperformance
+- The signal is actionable as a TAA input
+
+```{r plot-C-eq, fig.height=7, fig.cap="KF3-C (Equity Only): Forward relative return post-reversal. Compare the box widths and median positions to the full-universe version — a tighter distribution with clearer directional bias is a stronger signal."}
+print(p_C_eq)
+```
+
+### Side-by-Side Signal Comparison
+
+```{r signal-comparison}
+# Build a combined comparison table
+fwd_summary <- function(fwd_df, label) {
+  fwd_df %>%
+    filter(!is.na(fwd_rel_ret)) %>%
+    group_by(`Reversal type` = reversal_type, `Window` = window) %>%
+    summarise(
+      `N events`       = n(),
+      `Median fwd ret` = percent(median(fwd_rel_ret, na.rm = TRUE), accuracy = 0.1),
+      `% correct`      = percent(
+        mean(if_else(reversal_type == "W\u2192L",
+                     fwd_rel_ret < 0, fwd_rel_ret > 0), na.rm = TRUE),
+        accuracy = 1
+      ),
+      .groups = "drop"
+    ) %>%
+    mutate(Universe = label)
+}
+
+bind_rows(
+  fwd_summary(fwd_returns,    "Full universe"),
+  fwd_summary(fwd_returns_eq, "Equity only")
+) %>%
+  select(Universe, everything()) %>%
+  arrange(`Reversal type`, `Window`, Universe) %>%
+  ktable(
+    caption = paste0(
+      "Signal strength comparison: full universe vs equity-only. ",
+      "'% correct' = fraction of events where the post-reversal return ",
+      "confirmed the reversal direction. Higher = cleaner signal."
+    )
+  )
+```
+
+### Which Equity Sectors Reverse Most?
+
+```{r eq-top-reversals}
+reversals_eq %>%
+  count(ticker, reversal_type, sub_block) %>%
+  arrange(desc(n)) %>%
+  head(24) %>%
+  pivot_wider(names_from = reversal_type, values_from = n, values_fill = 0L) %>%
+  rename(Ticker = ticker, `Sector / block` = sub_block) %>%
+  arrange(desc(rowSums(across(where(is.integer))))) %>%
+  ktable(caption = "Top equity reversal tickers by total event count and sector")
+```
+
+> **What to look for:** If high-beta tech/growth ETFs (XLK, SMH, QQQ) dominate
+> W→L events concentrated in Fall, this confirms they are genuine momentum
+> leaders in Consolidation and Recovery that become victims of regime change —
+> exactly the pattern identified in KF3 Cycle Amplifiers.
+
+---
+
+## 10. Canary in the Mine — Leading and Confirming Indicators
+
+### Two Different Roles
+
+Not all ETFs are useful in the same way. This section separates the equity
+universe into two distinct roles:
+
+| Role | What it does | When to use it |
+|---|---|---|
+| **Transition canary** | Reversal signal arrives *before* the regime changes | Use for early warning — acts while the regime shift is still forming |
+| **Persistence confirmor** | Stays in Q5 (or Q1) throughout an entire regime episode | Use to confirm the current regime is still intact — regime health check |
+
+A canary ETF that consistently leads regime transitions by 2–3 weeks gives the
+TAA framework a **forward signal** it would not get from SPY's drawdown alone
+(which, by construction, can only confirm a Fall *after* −10% has already
+occurred).
+
+### How Lead Time Is Measured
+
+For each reversal event in the equity universe:
+
+- A **W→L event** is matched to the nearest **Fall onset date** within
+  ±`r CANARY_WIN` calendar days.
+- An **L→W event** is matched to the nearest **Recovery onset date** within
+  ±`r CANARY_WIN` calendar days.
+
+The **lead time** is:
+
+$$\text{lead time} = \text{transition date} - \text{exit date}$$
+
+- **Positive** → the reversal happened *before* the regime transition: the
+  ETF's momentum rank was already collapsing while the regime label had not
+  yet changed. This is the canary signal.
+- **Negative** → the reversal happened *after* the transition: the ETF was
+  slow to react. These are lagging indicators — confirming a change that
+  already happened, not warning of one coming.
+
+```{r canary-snapshot}
+tibble(
+  Metric  = c("Reversal events matched to a transition",
+              "W→L events with positive lead (canary)",
+              "L→W events with positive lead (canary)",
+              "Median lead time across all events"),
+  Value   = c(
+    as.character(nrow(canary_lead_tbl)),
+    as.character(sum(canary_lead_tbl$reversal_type == "W\u2192L" &
+                       canary_lead_tbl$lead_days > 0)),
+    as.character(sum(canary_lead_tbl$reversal_type == "L\u2192W" &
+                       canary_lead_tbl$lead_days > 0)),
+    paste0(round(median(canary_lead_tbl$lead_days, na.rm = TRUE)), " days")
+  )
+) %>%
+  ktable(caption = "Canary lead time overview")
+```
+
+### Plot D — Canary Lead Time by Ticker
+
+Each box shows the distribution of lead times for one ETF across all matched
+events. The key interpretation rules:
+
+- **Box entirely above zero** → this ETF *reliably leads* regime transitions.
+  Act when you see it reverse.
+- **Box straddling zero** → the ETF sometimes leads, sometimes lags. Useful
+  as a supporting signal but not a primary trigger.
+- **Box below zero** → this ETF is a lagging indicator. It confirms a regime
+  change that already happened. Useful for persistence confirmation but not
+  for early warning.
+
+> Only ETFs with a **canary score ≥ 25** (top half of the equity universe by
+> signal consistency) are shown.
+
+```{r plot-D, fig.height=9, fig.cap="KF3-D: Canary lead time distribution per equity ETF. Green zone = reversal preceded the regime transition. Red zone = reversal followed. Tickers with boxes in the green zone are early warning signals."}
+print(p_D)
+```
+
+### Top Transition Canaries
+
+```{r canary-table}
+canary_scores %>%
+  filter(canary_score >= 40) %>%
+  arrange(reversal_type, desc(canary_score)) %>%
+  transmute(
+    Ticker            = ticker,
+    `Sector`          = sub_block,
+    `Signal`          = reversal_type,
+    `Canary score`    = canary_score,
+    `N events`        = n_canary,
+    `Median lead`     = paste0(round(median_lead), "d"),
+    `% leading`       = percent(pct_leading, accuracy = 1),
+    `Mean lead`       = paste0(round(mean_lead), "d")
+  ) %>%
+  ktable(
+    caption = paste0(
+      "High-conviction transition canaries (score \u2265 40). ",
+      "Score = (n events) \u00d7 (% leading), normalised 0\u2013100. ",
+      "Median lead = typical advance warning in calendar days."
+    )
+  )
+```
+
+**How to read the canary table:**
+
+- **Median lead > 0** and **% leading > 60%** = reliable early warning.
+  When this ETF's persistent state exits, start monitoring for regime change.
+- **Median lead 10–25 days** is the sweet spot: long enough to act, short
+  enough to be timely. Leads > 30 days suggest the ETF is driven by a
+  different cycle than SPY.
+- A high canary score with a *negative* median lead means the ETF often
+  reverses *just after* a transition — it is a fast confirmer, not a
+  forecaster.
+
+### Plot E — Regime Persistence Heatmap
+
+This heatmap answers the *confirmation* question: once a regime is established,
+which equity ETFs spend the most time in Q5 (the winner bucket)?
+
+A ticker with **high Q5 persistence in Recovery** confirms the Recovery is
+running — it is not reversing, not churning, just steadily leading. If that
+ticker *starts* to exit Q5 mid-Recovery, it is an early warning that the
+regime may be tiring.
+
+The same logic in reverse for Fall: a high Q1 persistence ticker that *starts*
+to exit Q1 (entering Q2 or Q3) mid-Fall is a canary for an imminent Recovery.
+
+```{r plot-E, fig.height=8, fig.cap="KF3-E: Average fraction of weekly rebalance dates in Q5 (top equity quintile) within each regime episode, averaged across all episodes of that type. Dark blue = persistent regime leader. Only tickers with max Q5 persistence > 30% shown."}
+print(p_E)
+```
+
+### Regime Persistence Leaders
+
+```{r persistence-table}
+persistence_tbl %>%
+  group_by(ticker) %>%
+  filter(max(avg_pct_q5, na.rm = TRUE) > 0.35) %>%
+  ungroup() %>%
+  pivot_wider(id_cols = ticker,
+              names_from = regime,
+              values_from = c(avg_pct_q5, avg_pct_q1),
+              names_glue = "{regime}_{.value}") %>%
+  left_join(etf_metadata %>% select(ticker, sub_block), by = "ticker") %>%
+  transmute(
+    Ticker              = ticker,
+    `Sector`            = sub_block,
+    `Fall Q5%`          = percent(coalesce(Fall_avg_pct_q5,         0), accuracy = 1),
+    `Recovery Q5%`      = percent(coalesce(Recovery_avg_pct_q5,     0), accuracy = 1),
+    `Consolidation Q5%` = percent(coalesce(Consolidation_avg_pct_q5,0), accuracy = 1),
+    `Fall Q1%`          = percent(coalesce(Fall_avg_pct_q1,         0), accuracy = 1)
+  ) %>%
+  arrange(desc(parse_number(`Recovery Q5%`))) %>%
+  ktable(
+    caption = paste0(
+      "Intra-regime Q5 persistence leaders. ",
+      "Q5% = average fraction of rebalance dates in the top equity quintile. ",
+      "Q1% (Fall) = fraction in the bottom quintile during Fall — useful as a stress confirmor."
+    )
+  )
+```
+
+### The Combined Watchlist — Canary + Persistence Roles
+
+```{r combined-watchlist}
+# Canary role: top W→L canaries (signal Fall coming) + top L→W canaries
+# (signal Recovery coming)
+canary_role <- canary_scores %>%
+  filter(canary_score >= 40) %>%
+  group_by(ticker) %>%
+  slice_max(canary_score, n = 1) %>%
+  ungroup() %>%
+  transmute(
+    ticker,
+    role = paste0(reversal_type, " canary"),
+    score_label = paste0("Lead: ", round(median_lead), "d | ",
+                         percent(pct_leading, accuracy = 1), " leading")
+  )
+
+# Persistence role: high Recovery Q5 persistence = Recovery confirmor
+# high Fall Q1 persistence = Fall stress confirmor
+persist_role <- persistence_tbl %>%
+  pivot_wider(id_cols = ticker,
+              names_from = regime,
+              values_from = c(avg_pct_q5, avg_pct_q1),
+              names_glue = "{regime}_{.value}") %>%
+  mutate(
+    role = case_when(
+      coalesce(Recovery_avg_pct_q5, 0) >= 0.45   ~ "Recovery confirmor",
+      coalesce(Fall_avg_pct_q1, 0)     >= 0.45   ~ "Fall stress confirmor",
+      coalesce(Consolidation_avg_pct_q5, 0) >= 0.45 ~ "Consolidation leader",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(role)) %>%
+  transmute(
+    ticker,
+    role,
+    score_label = case_when(
+      role == "Recovery confirmor"      ~
+        percent(coalesce(Recovery_avg_pct_q5, 0),     accuracy = 1),
+      role == "Fall stress confirmor"   ~
+        percent(coalesce(Fall_avg_pct_q1, 0),         accuracy = 1),
+      role == "Consolidation leader"    ~
+        percent(coalesce(Consolidation_avg_pct_q5, 0),accuracy = 1)
+    )
+  )
+
+bind_rows(canary_role, persist_role) %>%
+  left_join(etf_metadata %>% select(ticker, sub_block), by = "ticker") %>%
+  arrange(role, ticker) %>%
+  transmute(
+    Ticker      = ticker,
+    `Sector`    = sub_block,
+    `TAA role`  = role,
+    `Signal quality` = score_label
+  ) %>%
+  ktable(
+    caption = paste0(
+      "Combined canary and persistence watchlist. ",
+      "Canary ETFs: monitor for reversal events as early regime-transition warnings. ",
+      "Confirmor ETFs: monitor for Q5/Q1 exits as regime-health alerts."
+    )
+  )
+```
+
+> **Practical TAA monitoring rule:**
+>
+> 1. **Weekly**: check if any *canary ETF* has exited its persistent winner/loser
+>    state. If a W→L canary reverses, put a Fall watch on the portfolio.
+>    If an L→W canary reverses, prepare the Recovery rotation list.
+>
+> 2. **Bi-weekly**: check if any *confirmor ETF* has dropped out of Q5
+>    mid-regime. If the Recovery confirmors start slipping from Q5, the
+>    Recovery may be tiring — time to trim the cyclical overweights.
+>
+> 3. **At regime transition** (SPY crosses −10%): the canary watchlist already
+>    told you who the new leaders will be. The Recovery rotation list is ready.
+
+### Section 10 Conclusion — The 10 Canary ETFs to Watch
+
+The table below distils the entire canary and persistence analysis into a
+single ranked watchlist. The **composite score** combines three dimensions:
+
+- **Canary strength** — how consistently and how early does this ETF lead
+  regime transitions? (from `canary_scores`)
+- **Recovery persistence** — how reliably does it stay in Q5 throughout a
+  Recovery, confirming the regime is running? (from `persistence_tbl`)
+- **Fall persistence (Q1)** — how reliably does it stay in Q1 throughout a
+  Fall, confirming stress is ongoing? (also `persistence_tbl`)
+
+Each dimension is normalised 0–100 within the equity universe and averaged
+with equal weights. Tickers are ranked by this composite.
+
+```{r canary-top10}
+# Canary strength: max of W→L and L→W canary scores per ticker
+canary_strength <- canary_scores %>%
+  group_by(ticker) %>%
+  summarise(
+    best_canary_score = max(canary_score, na.rm = TRUE),
+    best_signal       = reversal_type[which.max(canary_score)],
+    best_median_lead  = median_lead[which.max(canary_score)],
+    best_pct_leading  = pct_leading[which.max(canary_score)],
+    .groups = "drop"
+  )
+
+# Recovery and Fall persistence scores (normalised 0-100)
+persist_scores <- persistence_tbl %>%
+  pivot_wider(id_cols = ticker,
+              names_from = regime,
+              values_from = c(avg_pct_q5, avg_pct_q1),
+              names_glue = "{regime}_{.value}") %>%
+  mutate(
+    rec_score  = round(100 * coalesce(Recovery_avg_pct_q5, 0) /
+                         max(coalesce(Recovery_avg_pct_q5, 0), na.rm = TRUE)),
+    fall_score = round(100 * coalesce(Fall_avg_pct_q1, 0) /
+                         max(coalesce(Fall_avg_pct_q1, 0), na.rm = TRUE))
+  ) %>%
+  select(ticker, rec_score, fall_score,
+         Recovery_avg_pct_q5, Fall_avg_pct_q1)
+
+# Composite
+canary_top10 <- canary_strength %>%
+  left_join(persist_scores, by = "ticker") %>%
+  left_join(etf_metadata %>% select(ticker, sub_block), by = "ticker") %>%
+  mutate(
+    composite = round((coalesce(best_canary_score, 0) +
+                         coalesce(rec_score,  0) +
+                         coalesce(fall_score, 0)) / 3)
+  ) %>%
+  arrange(desc(composite)) %>%
+  head(10) %>%
+  transmute(
+    `#`               = row_number(),
+    Ticker            = ticker,
+    `Sector`          = sub_block,
+    `Best signal`     = best_signal,
+    `Median lead`     = paste0(round(coalesce(best_median_lead, 0)), "d"),
+    `% leading`       = percent(coalesce(best_pct_leading, 0), accuracy = 1),
+    `Recovery Q5%`    = percent(coalesce(Recovery_avg_pct_q5, 0), accuracy = 1),
+    `Fall Q1%`        = percent(coalesce(Fall_avg_pct_q1, 0),     accuracy = 1),
+    `Composite score` = composite
+  )
+
+canary_top10 %>%
+  ktable(
+    caption = paste0(
+      "Top 10 canary ETFs by composite score. ",
+      "Composite = average of (canary score, Recovery Q5 persistence score, ",
+      "Fall Q1 persistence score), each normalised 0\u2013100. ",
+      "'Best signal' = the reversal direction with the highest canary score. ",
+      "'Median lead' = typical advance warning before regime transition."
+    )
+  )
+```
+
+```{r canary-top10-roles, echo=FALSE}
+# Annotate each ticker with its primary TAA role in plain English
+canary_top10_annotated <- canary_top10 %>%
+  left_join(
+    canary_scores %>%
+      group_by(ticker) %>%
+      summarise(
+        wl = max(canary_score[reversal_type == "W\u2192L"], na.rm = TRUE),
+        lw = max(canary_score[reversal_type == "L\u2192W"], na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(wl = if_else(is.infinite(wl), 0, wl),
+             lw = if_else(is.infinite(lw), 0, lw)),
+    by = c("Ticker" = "ticker")
+  ) %>%
+  left_join(
+    persist_scores %>% select(ticker, rec_score, fall_score),
+    by = c("Ticker" = "ticker")
+  ) %>%
+  mutate(
+    `TAA role` = case_when(
+      wl >= 50 & lw >= 50          ~ "Bilateral canary — warns both Fall & Recovery",
+      wl >= 50 & coalesce(fall_score, 0) >= 60
+                                   ~ "Fall warning + stress confirmor",
+      lw >= 50 & coalesce(rec_score,  0) >= 60
+                                   ~ "Recovery warning + momentum confirmor",
+      wl >= 50                     ~ "Fall transition canary",
+      lw >= 50                     ~ "Recovery transition canary",
+      coalesce(rec_score, 0) >= 60 ~ "Recovery momentum confirmor",
+      coalesce(fall_score,0) >= 60 ~ "Fall stress confirmor",
+      TRUE                         ~ "Supporting signal"
+    )
+  ) %>%
+  select(Ticker, `Sector`, `TAA role`, `Composite score`)
+
+canary_top10_annotated %>%
+  ktable(
+    caption = paste0(
+      "Primary TAA role for each top-10 canary ETF. ",
+      "Use this table to assign each ticker to a monitoring lane: ",
+      "canaries to watch weekly for reversal events, ",
+      "confirmors to check bi-weekly for Q5 exits."
+    )
+  )
+```
+
+### How to Read These Two Tables
+
+**Table 1 — Top 10 Canary ETFs column guide:**
+
+| Column | What it tells you |
+|:---|:---|
+| Best signal | Whether this ETF is primarily a W→L or L→W canary |
+| Median lead | Typical advance warning in days before the transition |
+| % leading | How reliably the signal arrives before (not after) the transition |
+| Recovery Q5% | Fraction of Recovery time spent in the top equity quintile |
+| Fall Q1% | Fraction of Fall time spent in the bottom equity quintile |
+| Composite score | Average of canary + Recovery persistence + Fall persistence, each 0–100 |
+
+**Table 2 — TAA role labels explained:**
+
+- **Bilateral canary** — warns both directions; monitor for any reversal event regardless of regime
+- **Fall warning + stress confirmor** — strong W→L lead time AND high intra-Fall Q1 persistence; primary Fall early-warning ticker
+- **Recovery warning + momentum confirmor** — strong L→W lead time AND high intra-Recovery Q5 persistence; primary Recovery early-warning ticker
+- **Fall / Recovery transition canary** — strong lead time in one direction only; use as a directional trigger
+- **Recovery momentum confirmor / Fall stress confirmor** — high persistence score but weak lead time; use for regime health checks, not early warning
+- **Supporting signal** — contributes to the composite but is not a primary trigger on its own
+
+---
+
+## 11. Investment Conclusion — Which Equity ETFs to Focus on for TAA?
+
+The three plots above describe the *mechanism*. This section converts that
+into an **actionable TAA watchlist**: which equity ETFs have the most reliable
+reversal signals, in which regime to act, and in which direction.
+
+### How the TAA Focus Score Is Built
+
+For each equity ETF we compute two one-sided scores:
+
+- **Re-entry score (L→W):** How often does this ticker flip from persistent
+  loser to persistent winner, and how much does it outperform SPY in the
+  following 63 days? A high score = a reliable "buy on regime change" candidate.
+
+- **Exit score (W→L):** How often does this ticker flip from persistent winner
+  to persistent loser, and by how much does it underperform SPY afterward?
+  A high score = a reliable "sell / reduce on regime change" candidate.
+
+Both scores are normalised 0–100 across the equity universe. The **dominant
+regime** column shows where most of this ticker's events occur — Fall events
+are the most actionable because they coincide with a regime transition signal
+that the framework already detects.
+
+```{r taa-focus-score, echo=FALSE}
+# ── Per-ticker forward return quality (equity universe only) ──────────────────
+fwd_63_eq <- fwd_returns_eq %>%
+  filter(window == "63-day fwd", !is.na(fwd_rel_ret))
+
+# L→W score: frequency × directional accuracy × median magnitude
+lw_score <- fwd_63_eq %>%
+  filter(reversal_type == "L\u2192W") %>%
+  group_by(ticker) %>%
+  summarise(
+    lw_n          = n(),
+    lw_median_fwd = median(fwd_rel_ret, na.rm = TRUE),
+    lw_pct_ok     = mean(fwd_rel_ret > 0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    lw_raw   = lw_n * lw_pct_ok * pmax(lw_median_fwd, 0),
+    lw_score = round(100 * (lw_raw - min(lw_raw, na.rm = TRUE)) /
+                     (max(lw_raw, na.rm = TRUE) - min(lw_raw, na.rm = TRUE) + 1e-9))
+  )
+
+# W→L score: frequency × directional accuracy × median magnitude (negative = good)
+wl_score <- fwd_63_eq %>%
+  filter(reversal_type == "W\u2192L") %>%
+  group_by(ticker) %>%
+  summarise(
+    wl_n          = n(),
+    wl_median_fwd = median(fwd_rel_ret, na.rm = TRUE),
+    wl_pct_ok     = mean(fwd_rel_ret < 0, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    wl_raw   = wl_n * wl_pct_ok * pmax(-wl_median_fwd, 0),
+    wl_score = round(100 * (wl_raw - min(wl_raw, na.rm = TRUE)) /
+                     (max(wl_raw, na.rm = TRUE) - min(wl_raw, na.rm = TRUE) + 1e-9))
+  )
+
+# Dominant regime for each ticker's reversal events
+dominant_regime <- reversals_eq %>%
+  count(ticker, regime_at_exit) %>%
+  group_by(ticker) %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(ticker, dominant_regime = regime_at_exit)
+
+# Combine
+taa_focus <- etf_metadata %>%
+  filter(ticker %in% universe_eq) %>%
+  select(ticker, sub_block) %>%
+  left_join(lw_score %>% select(ticker, lw_n, lw_score, lw_median_fwd, lw_pct_ok),
+            by = "ticker") %>%
+  left_join(wl_score %>% select(ticker, wl_n, wl_score, wl_median_fwd, wl_pct_ok),
+            by = "ticker") %>%
+  left_join(dominant_regime, by = "ticker") %>%
+  filter(!is.na(lw_score) | !is.na(wl_score)) %>%
+  mutate(
+    combined_score = coalesce(lw_score, 0L) + coalesce(wl_score, 0L),
+    lw_score       = coalesce(lw_score, 0L),
+    wl_score       = coalesce(wl_score, 0L)
+  ) %>%
+  arrange(desc(combined_score))
+```
+
+### The TAA Focus List — Top 20 Equity ETFs by Signal Strength
+
+```{r taa-focus-table}
+taa_focus %>%
+  head(20) %>%
+  transmute(
+    Ticker            = ticker,
+    `Sector / block`  = sub_block,
+    `Dominant regime` = coalesce(dominant_regime, "—"),
+    `L→W score`       = lw_score,
+    `L→W events`      = coalesce(lw_n, 0L),
+    `L→W median 63d`  = percent(coalesce(lw_median_fwd, 0), accuracy = 0.1),
+    `L→W % correct`   = percent(coalesce(lw_pct_ok, 0),    accuracy = 1),
+    `W→L score`       = wl_score,
+    `W→L events`      = coalesce(wl_n, 0L),
+    `W→L median 63d`  = percent(coalesce(wl_median_fwd, 0), accuracy = 0.1)
+  ) %>%
+  ktable(
+    caption = paste0(
+      "TAA Focus List — top 20 equity ETFs ranked by combined L→W + W→L signal strength. ",
+      "Scores are 0–100 normalised within the equity universe. ",
+      "L→W = buy signal at regime shift; W→L = exit/reduce signal."
+    )
+  )
+```
+
+### Regime-Specific TAA Playbook
+
+The table above identifies *who* has the signal. The table below tells you
+*when* to act, structured as a regime-conditional playbook.
+
+```{r taa-playbook}
+# High-conviction L→W in Recovery → buy at regime shift
+recovery_buys <- reversals_eq %>%
+  filter(reversal_type == "L\u2192W", regime_at_exit == "Recovery") %>%
+  count(ticker) %>%
+  left_join(lw_score %>% select(ticker, lw_score, lw_pct_ok, lw_median_fwd),
+            by = "ticker") %>%
+  filter(!is.na(lw_score), lw_score >= 30) %>%
+  arrange(desc(n)) %>%
+  left_join(etf_metadata %>% select(ticker, sub_block), by = "ticker")
+
+# High-conviction W→L in Fall → exit at regime onset
+fall_exits <- reversals_eq %>%
+  filter(reversal_type == "W\u2192L", regime_at_exit == "Fall") %>%
+  count(ticker) %>%
+  left_join(wl_score %>% select(ticker, wl_score, wl_pct_ok, wl_median_fwd),
+            by = "ticker") %>%
+  filter(!is.na(wl_score), wl_score >= 30) %>%
+  arrange(desc(n)) %>%
+  left_join(etf_metadata %>% select(ticker, sub_block), by = "ticker")
+
+cat("─── BUY / OVERWEIGHT at Fall → Recovery transition ───\n")
+recovery_buys %>%
+  transmute(
+    Ticker           = ticker,
+    `Sector`         = sub_block,
+    `Recovery L→W events` = n,
+    `Signal score`   = lw_score,
+    `% correct 63d`  = percent(lw_pct_ok,    accuracy = 1),
+    `Median 63d fwd` = percent(lw_median_fwd, accuracy = 0.1)
+  ) %>%
+  ktable(caption = "BUY / OVERWEIGHT candidates: L→W events concentrated in Recovery")
+
+cat("\n─── SELL / REDUCE at Consolidation → Fall transition ───\n")
+fall_exits %>%
+  transmute(
+    Ticker           = ticker,
+    `Sector`         = sub_block,
+    `Fall W→L events` = n,
+    `Signal score`   = wl_score,
+    `% correct 63d`  = percent(wl_pct_ok,    accuracy = 1),
+    `Median 63d fwd` = percent(wl_median_fwd, accuracy = 0.1)
+  ) %>%
+  ktable(caption = "SELL / REDUCE candidates: W→L events concentrated in Fall onset")
+```
+
+### Reading the Playbook
+
+**Column definitions:**
+
+- **L→W score / W→L score** — 0–100, normalised within the equity universe.
+  Above 50 = top-half signal quality. Above 75 = high conviction.
+- **% correct 63d** — fraction of events where the post-reversal 63-day
+  relative return confirmed the signal direction. Above 55% is economically
+  meaningful; above 60% is strong.
+- **Median 63d fwd** — the *typical* relative return vs SPY in the 63 days
+  after the reversal. Positive for L→W (ticker outperforms), negative for
+  W→L (ticker underperforms).
+
+**How to use this in TAA:**
+
+> When the SPY drawdown crosses the **10% Fall threshold** (the trigger already
+> built into `build_regime_table()`), the framework should immediately flag the
+> W→L candidates in the exit table for **reduction or removal** from the TAA
+> sleeve. These are the tickers most likely to underperform SPY for the next
+> 63 trading days.
+
+> When SPY bottoms and begins recovering (regime flips to Recovery), the L→W
+> candidates in the buy table are the **first rotation targets** — the tickers
+> empirically most likely to outperform SPY by the largest margin over the next
+> quarter.
+
+> In **Consolidation**, momentum is most reliable (the transition matrix
+> diagonal is highest). No regime-conditional discount is needed — the standard
+> trailing-return TAA rank applies.
+
+### Connection to the Current SAA Portfolio
+
+```{r saa-connection}
+SAA_TICKERS <- c("SPY", "URTH", "QQQ", "XLK", "SMH")
+
+taa_focus %>%
+  filter(ticker %in% SAA_TICKERS) %>%
+  transmute(
+    Ticker           = ticker,
+    `Sector / block` = sub_block,
+    `L→W score`      = lw_score,
+    `W→L score`      = wl_score,
+    `Combined score` = combined_score,
+    `Dominant regime`= coalesce(dominant_regime, "—"),
+    `TAA implication` = case_when(
+      lw_score > wl_score & lw_score >= 40 ~
+        "Strong buy signal at regime shift — overweight in Recovery",
+      wl_score > lw_score & wl_score >= 40 ~
+        "Strong exit signal at regime onset — reduce in Fall",
+      combined_score >= 40 ~
+        "Bilateral signal — active both ways",
+      TRUE ~
+        "Weak reversal signal — hold at SAA weight"
+    )
+  ) %>%
+  ktable(
+    caption = paste0(
+      "TAA signal quality for current SAA equity holdings. ",
+      "Scores above 40 indicate meaningful reversal signal worthy of active TAA overlay."
+    )
+  )
+```
+
+---
+
+---
+
+## 12. Technical Appendix
+
+### Why 60 Days as the Formation Window?
+
+The 60-day window (≈ 3 months) is a deliberate compromise:
+
+- Shorter windows (10–20 days) are dominated by microstructure noise and
+  mean-reversion. The 1-week reversal effect is well-documented in academic
+  literature and is largely a liquidity artefact.
+- Longer windows (120–252 days) capture structural trends but are too slow to
+  detect regime transitions, which typically play out in 4–10 weeks.
+- 60 days roughly aligns with one *earnings cycle*, making it economically
+  motivated: the rank reflects approximately one quarter of fundamental news.
+
+### Why Weekly (Not Daily) Rebalancing?
+
+Daily quintile changes are dominated by noise: a ticker in Q5 moves to Q4 one
+day and back to Q5 the next simply due to daily return volatility. Weekly
+rebalancing smooths this without losing meaningful information about medium-term
+trends.
+
+### The Persistence Filter as a Noise Gate
+
+The `PERSIST_N = 3` filter means a ticker must be in Q1 or Q5 for **15
+consecutive trading days** before it is labelled as persistent. This filters
+out approximately 60–70% of quintile transitions that are statistical flukes
+rather than genuine regime shifts in relative performance.
+
+### How the Transition Window Prevents False Signals
+
+Without `TRANSIT_WIN = 8`, we might label a W→L event when a ticker left Q5,
+spent 6 months in Q3, and *then* entered Q1. That is not a reversal — it is two
+unrelated events. The 8-week cap ensures that only *fast* transitions from one
+extreme to the other are captured, which is precisely the regime-driven
+reversal mechanism we are trying to measure.
+
+---
+
+*Analysis built on `key_findings/kf3_trend_reversal.R` — source that file to
+reproduce all objects. Full-universe: `rank_tbl`, `reversals`, `fwd_returns`,
+`p_A/B/C`. Equity-only: `rank_tbl_eq`, `reversals_eq`, `fwd_returns_eq`,
+`p_A_eq/B_eq/C_eq`. Canary: `canary_lead_tbl`, `canary_scores`,
+`persistence_tbl`, `p_D`, `p_E`. Parameters: REBAL_FREQ = `r REBAL_FREQ` days,
+LOOKBACK = `r LOOKBACK` days, PERSIST_N = `r PERSIST_N` periods,
+TRANSIT_WIN = `r TRANSIT_WIN` periods, CANARY_WIN = `r CANARY_WIN` days.*

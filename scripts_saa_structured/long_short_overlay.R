@@ -432,3 +432,451 @@ charts.PerformanceSummary(
 )
 
 ################################################################################
+# ==============================================================================
+# PHASE 2: L/S Overlay on top of 50/50 Core Portfolio
+# ==============================================================================
+#
+# The overlay is dollar-neutral (net = 0), so adding it to the core does not
+# change the core's market exposure. The combined return is simply:
+#
+#   R_combined = R_core + R_ls_overlay
+#
+# We compare three series:
+#   1. Core alone  : 50% SPY + 50% AGG, monthly rebalanced
+#   2. LS alone    : dollar-neutral L/S on core 15-ETF universe
+#   3. Core + LS   : core portfolio augmented with the overlay
+#
+# ==============================================================================
+
+# ── Load absolute returns (needed by calc_saa_portfolio) ─────────────────────
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+# ── Build 50/50 core ──────────────────────────────────────────────────────────
+source(here("scripts_saa_taa/05_saa_portfolio.R"))
+
+core_5050 <- calc_saa_portfolio(
+  xts_returns    = xts_ret,
+  weights_vector = c(SPY = 0.50, AGG = 0.50),
+  rebalance_freq = "months"
+)
+
+# ── Align dates across core and overlay ───────────────────────────────────────
+common_idx2  <- intersect(index(core_5050$returns), index(ls_core$returns))
+core_ret     <- core_5050$returns[common_idx2]
+ls_ret       <- ls_core$returns[common_idx2]
+combined_ret <- xts(as.numeric(core_ret) + as.numeric(ls_ret),
+                    order.by = common_idx2)
+
+colnames(core_ret)     <- "Core_5050"
+colnames(ls_ret)       <- "LS_Core_15"
+colnames(combined_ret) <- "Core_plus_LS"
+
+phase2_comp <- merge(core_ret, ls_ret, combined_ret)
+
+# ── Performance table ─────────────────────────────────────────────────────────
+cat("\014")
+cat("── Phase 2: Core (50/50) vs L/S Overlay vs Combined ────────────────────\n")
+print(table.AnnualizedReturns(phase2_comp, scale = 252))
+cat("\n── Top 3 Drawdowns: Core + L/S ─────────────────────────────────────────\n")
+print(table.Drawdowns(phase2_comp[, "Core_plus_LS"], top = 3))
+cat("─────────────────────────────────────────────────────────────────────────\n")
+
+# ── Performance chart ─────────────────────────────────────────────────────────
+charts.PerformanceSummary(
+  phase2_comp,
+  main       = "Phase 2: 50/50 Core + L/S Overlay",
+  colorset   = c("#bdc3c7", "#27ae60", "#2c3e50"),
+  lwd        = c(2, 2, 3),
+  legend.loc = "topleft"
+)
+
+################################################################################
+# ==============================================================================
+# VISUALIZATIONS
+# ==============================================================================
+# P1  : PCA biplot — ETFs in PC1/PC2 factor space
+# P2  : Correlation heatmap of 15 core ETFs
+# P3  : Cumulative wealth index — Full vs Core (log scale)
+# P4  : Rolling 252-day Sharpe — Full vs Core
+# P5  : Annual return bars — Full vs Core
+# P6  : Return density — Full vs Core
+# P7  : Wealth index — Core / LS / Combined
+# P8  : Return scatter — Core vs LS (correlation check)
+# P9  : Risk/return space — all portfolios
+# P10 : Rolling 252-day correlation — Core vs LS
+# P11 : Annual return bars — Core / LS / Combined
+# P12 : Drawdown comparison — overlaid series
+# ==============================================================================
+
+library(scales)
+
+# Shared palette
+pal <- c(
+  Full_59      = "#bdc3c7",
+  Core_15      = "#2c3e50",
+  Core_5050    = "#95a5a6",
+  LS_Core_15   = "#27ae60",
+  Core_plus_LS = "#e74c3c"
+)
+
+# ── Recompute PCA for visuals (uses objects already in environment) ────────────
+xts_u_pca <- xts_rel[, setdiff(colnames(xts_rel), "SPY")]
+xts_u_pca <- xts_u_pca[, apply(xts_u_pca, 2, function(x) sd(x, na.rm = TRUE) > 0)]
+pca_vis   <- prcomp(as.matrix(xts_u_pca), scale. = TRUE, center = TRUE)
+
+# Factor group labels for colour
+factor_group <- case_when(
+  colnames(xts_u_pca) %in% c("AGG","IEF","TLT","HYG","TIP","LQD","BND","SHY",
+                               "SGOV","EMB","EMLC","AOR","AOK")       ~ "Bonds/Rates",
+  colnames(xts_u_pca) %in% c("IEFA","FEZ","VWO","ACWX","URTH","EWQ",
+                               "DAX","EWY","EWL","IGF")                ~ "International",
+  colnames(xts_u_pca) %in% c("QQQ","XLK","XLF","XLI","XLE","XLP",
+                               "WCLD","CIBR","SMH","IPO","IYT","PSP") ~ "Equity Sector",
+  colnames(xts_u_pca) %in% c("GLD","VIXY","USMV","COPX")             ~ "Tail/Alts",
+  TRUE                                                                  ~ "Other"
+)
+
+# ── P1: PCA Biplot ─────────────────────────────────────────────────────────────
+var_exp_vis <- summary(pca_vis)$importance[2, 1:2] * 100
+
+pca_df <- data.frame(
+  ticker  = colnames(xts_u_pca),
+  PC1     = pca_vis$rotation[, 1],
+  PC2     = pca_vis$rotation[, 2],
+  group   = factor_group,
+  in_core = colnames(xts_u_pca) %in% core_universe
+)
+
+print(
+  ggplot(pca_df, aes(x = PC1, y = PC2, colour = group, size = in_core)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey70") +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "grey70") +
+    geom_point(alpha = 0.8) +
+    ggrepel::geom_text_repel(
+      data    = filter(pca_df, in_core),
+      aes(label = ticker),
+      size    = 3.2, fontface = "bold", max.overlaps = 20, show.legend = FALSE
+    ) +
+    scale_size_manual(values = c("TRUE" = 4, "FALSE" = 1.5),
+                      guide  = "none") +
+    scale_colour_manual(values = c(
+      "Bonds/Rates"   = "#2980b9",
+      "International" = "#8e44ad",
+      "Equity Sector" = "#27ae60",
+      "Tail/Alts"     = "#e67e22",
+      "Other"         = "#bdc3c7"
+    )) +
+    theme_minimal(base_size = 12) +
+    theme(legend.position = "bottom", panel.grid.minor = element_blank()) +
+    labs(
+      title    = "P1: PCA Biplot — ETF Factor Space",
+      subtitle = sprintf("PC1 (%.1f%% var): Bonds vs Equity  |  PC2 (%.1f%% var): International vs Domestic",
+                         var_exp_vis[1], var_exp_vis[2]),
+      x        = sprintf("PC1 (%.1f%%)", var_exp_vis[1]),
+      y        = sprintf("PC2 (%.1f%%)", var_exp_vis[2]),
+      colour   = NULL
+    )
+)
+
+# ── P2: Correlation heatmap of 15 core ETFs ───────────────────────────────────
+core_cor <- cor(as.matrix(xts_rel[, core_universe]), use = "pairwise.complete.obs")
+
+core_cor_df <- as.data.frame(core_cor) %>%
+  rownames_to_column("ETF1") %>%
+  pivot_longer(-ETF1, names_to = "ETF2", values_to = "corr") %>%
+  mutate(
+    ETF1 = factor(ETF1, levels = core_universe),
+    ETF2 = factor(ETF2, levels = rev(core_universe))
+  )
+
+print(
+  ggplot(core_cor_df, aes(x = ETF1, y = ETF2, fill = corr)) +
+    geom_tile(colour = "white", linewidth = 0.4) +
+    geom_text(aes(label = round(corr, 2)), size = 2.8,
+              colour = ifelse(abs(core_cor_df$corr) > 0.5, "white", "black")) +
+    scale_fill_gradient2(low = "#c0392b", mid = "white", high = "#2980b9",
+                         midpoint = 0, limits = c(-1, 1), name = "Correlation") +
+    theme_minimal(base_size = 11) +
+    theme(
+      axis.text.x     = element_text(angle = 45, hjust = 1),
+      panel.grid      = element_blank(),
+      legend.position = "right"
+    ) +
+    labs(title    = "P2: Core 15-ETF Correlation Matrix (xts_rel)",
+         subtitle = "Relative-return correlations — low cross-factor correlation confirms diversity",
+         x = NULL, y = NULL)
+)
+
+# ── P3: Cumulative wealth index — Full vs Core (log scale) ────────────────────
+wealth_df <- data.frame(
+  date     = index(comp),
+  Full_59  = as.numeric(cumprod(1 + comp[, "LS_Full_59"])),
+  Core_15  = as.numeric(cumprod(1 + comp[, "LS_Core_15"]))
+) %>%
+  pivot_longer(-date, names_to = "Series", values_to = "Wealth")
+
+print(
+  ggplot(wealth_df, aes(x = date, y = Wealth, colour = Series)) +
+    geom_line(linewidth = 1.1) +
+    scale_y_log10(labels = scales::dollar_format(prefix = "$")) +
+    scale_colour_manual(values = c(Full_59 = pal["Full_59"], Core_15 = pal["Core_15"])) +
+    scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+    labs(title    = "P3: Wealth Index — Full (59) vs Core (15) Universe",
+         subtitle = "Log scale | $1 invested Jan 2018",
+         x = NULL, y = "Portfolio Value (log scale)", colour = NULL)
+)
+
+# ── P4: Rolling 252-day Sharpe — Full vs Core ─────────────────────────────────
+roll_sharpe <- function(ret_xts, width = 252) {
+  rollapply(ret_xts, width = width,
+            FUN    = function(x) mean(x, na.rm = TRUE) / sd(x, na.rm = TRUE) * sqrt(252),
+            fill   = NA, align = "right")
+}
+
+rs_df <- data.frame(
+  date    = index(comp),
+  Full_59 = as.numeric(roll_sharpe(comp[, "LS_Full_59"])),
+  Core_15 = as.numeric(roll_sharpe(comp[, "LS_Core_15"]))
+) %>%
+  pivot_longer(-date, names_to = "Series", values_to = "Sharpe") %>%
+  filter(!is.na(Sharpe))
+
+print(
+  ggplot(rs_df, aes(x = date, y = Sharpe, colour = Series)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_hline(yintercept = 1, linetype = "dotted", colour = "grey60") +
+    geom_line(linewidth = 1) +
+    scale_colour_manual(values = c(Full_59 = pal["Full_59"], Core_15 = pal["Core_15"])) +
+    scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+    labs(title    = "P4: Rolling 252-Day Sharpe Ratio — Full vs Core",
+         subtitle = "Dotted line = Sharpe 1.0 | Dashed = 0",
+         x = NULL, y = "Rolling Sharpe (ann.)", colour = NULL)
+)
+
+# ── P5: Annual return bars — Full vs Core ─────────────────────────────────────
+ann_ret_df <- data.frame(
+  date    = index(comp),
+  Full_59 = as.numeric(comp[, "LS_Full_59"]),
+  Core_15 = as.numeric(comp[, "LS_Core_15"])
+) %>%
+  mutate(year = lubridate::year(date)) %>%
+  group_by(year) %>%
+  summarise(Full_59 = prod(1 + Full_59) - 1,
+            Core_15 = prod(1 + Core_15) - 1,
+            .groups = "drop") %>%
+  pivot_longer(-year, names_to = "Series", values_to = "Return")
+
+print(
+  ggplot(ann_ret_df, aes(x = factor(year), y = Return, fill = Series)) +
+    geom_col(position = "dodge", width = 0.7, alpha = 0.9) +
+    geom_hline(yintercept = 0, colour = "grey40") +
+    scale_fill_manual(values = c(Full_59 = pal["Full_59"], Core_15 = pal["Core_15"])) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+    labs(title = "P5: Annual Returns — Full (59) vs Core (15) Universe",
+         x = NULL, y = "Annual Return", fill = NULL)
+)
+
+# ── P6: Return density — Full vs Core ─────────────────────────────────────────
+dens_df <- data.frame(
+  Full_59 = as.numeric(comp[, "LS_Full_59"]),
+  Core_15 = as.numeric(comp[, "LS_Core_15"])
+) %>%
+  pivot_longer(everything(), names_to = "Series", values_to = "Return")
+
+print(
+  ggplot(dens_df, aes(x = Return, fill = Series, colour = Series)) +
+    geom_density(alpha = 0.35, linewidth = 1) +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50") +
+    scale_fill_manual(values  = c(Full_59 = pal["Full_59"], Core_15 = pal["Core_15"])) +
+    scale_colour_manual(values = c(Full_59 = pal["Full_59"], Core_15 = pal["Core_15"])) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1),
+                       limits = c(-0.06, 0.06)) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+    labs(title    = "P6: Daily Return Distribution — Full vs Core",
+         subtitle = "Core (15) is narrower — less noise from redundant tickers",
+         x = "Daily Return", y = "Density", fill = NULL, colour = NULL)
+)
+
+# ── P7: Phase 2 wealth index — Core / LS / Combined ──────────────────────────
+p2_wealth_df <- data.frame(
+  date         = index(phase2_comp),
+  Core_5050    = as.numeric(cumprod(1 + phase2_comp[, "Core_5050"])),
+  LS_Core_15   = as.numeric(cumprod(1 + phase2_comp[, "LS_Core_15"])),
+  Core_plus_LS = as.numeric(cumprod(1 + phase2_comp[, "Core_plus_LS"]))
+) %>%
+  pivot_longer(-date, names_to = "Series", values_to = "Wealth")
+
+print(
+  ggplot(p2_wealth_df, aes(x = date, y = Wealth, colour = Series, linewidth = Series)) +
+    geom_line() +
+    scale_colour_manual(values = c(
+      Core_5050    = pal["Core_5050"],
+      LS_Core_15   = pal["LS_Core_15"],
+      Core_plus_LS = pal["Core_plus_LS"]
+    )) +
+    scale_linewidth_manual(values = c(Core_5050 = 1, LS_Core_15 = 1, Core_plus_LS = 2),
+                           guide  = "none") +
+    scale_y_log10(labels = scales::dollar_format(prefix = "$")) +
+    scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+    labs(title    = "P7: Phase 2 Wealth Index — Core / L/S / Combined",
+         subtitle = "Log scale | $1 invested | Bold = Core + L/S overlay",
+         x = NULL, y = "Portfolio Value (log scale)", colour = NULL)
+)
+
+# ── P8: Return scatter — Core vs LS ──────────────────────────────────────────
+scatter_df <- data.frame(
+  Core = as.numeric(phase2_comp[, "Core_5050"]),
+  LS   = as.numeric(phase2_comp[, "LS_Core_15"])
+)
+r_sq <- round(cor(scatter_df$Core, scatter_df$LS)^2, 3)
+
+print(
+  ggplot(scatter_df, aes(x = Core, y = LS)) +
+    geom_point(alpha = 0.25, size = 0.9, colour = "#2c3e50") +
+    geom_smooth(method = "lm", se = TRUE, colour = "#e74c3c", linewidth = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank()) +
+    labs(
+      title    = "P8: Daily Returns — Core (50/50) vs L/S Overlay",
+      subtitle = sprintf("R² = %.3f — near-zero correlation confirms overlay adds independent alpha",
+                         r_sq),
+      x = "Core 50/50 Daily Return",
+      y = "L/S Overlay Daily Return"
+    )
+)
+
+# ── P9: Risk/return space — all portfolios ────────────────────────────────────
+all_rets <- merge(comp, phase2_comp[, c("Core_5050", "Core_plus_LS")])
+
+rr_df <- data.frame(
+  Series = colnames(all_rets),
+  Return = as.numeric(table.AnnualizedReturns(all_rets, scale = 252)[1, ]),
+  Vol    = as.numeric(table.AnnualizedReturns(all_rets, scale = 252)[2, ]),
+  Sharpe = as.numeric(table.AnnualizedReturns(all_rets, scale = 252)[3, ])
+)
+
+print(
+  ggplot(rr_df, aes(x = Vol, y = Return, colour = Series, size = Sharpe)) +
+    geom_point(alpha = 0.9) +
+    ggrepel::geom_text_repel(aes(label = sprintf("%s\nSharpe %.2f", Series, Sharpe)),
+                              size = 3.2, show.legend = FALSE) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    scale_colour_manual(values = c(
+      LS_Full_59   = pal["Full_59"],
+      LS_Core_15   = pal["Core_15"],
+      Core_5050    = pal["Core_5050"],
+      Core_plus_LS = pal["Core_plus_LS"]
+    )) +
+    scale_size_continuous(range = c(4, 10), guide = "none") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "none") +
+    labs(title    = "P9: Risk/Return Space — All Portfolios",
+         subtitle = "Bubble size = Sharpe ratio",
+         x = "Annualised Volatility", y = "Annualised Return")
+)
+
+# ── P10: Rolling 252-day correlation — Core vs LS ─────────────────────────────
+roll_cor <- rollapply(
+  merge(phase2_comp[, "Core_5050"], phase2_comp[, "LS_Core_15"]),
+  width = 252,
+  FUN   = function(m) cor(m[, 1], m[, 2], use = "complete.obs"),
+  by.column = FALSE, fill = NA, align = "right"
+)
+
+print(
+  data.frame(date = index(roll_cor), corr = as.numeric(roll_cor)) %>%
+    filter(!is.na(corr)) %>%
+    ggplot(aes(x = date, y = corr)) +
+    geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+    geom_ribbon(aes(ymin = pmin(corr, 0), ymax = 0), fill = "#e74c3c", alpha = 0.3) +
+    geom_ribbon(aes(ymin = 0, ymax = pmax(corr, 0)), fill = "#27ae60", alpha = 0.3) +
+    geom_line(linewidth = 0.9, colour = "#2c3e50") +
+    scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+    scale_y_continuous(limits = c(-1, 1)) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank()) +
+    labs(title    = "P10: Rolling 252-Day Correlation — Core (50/50) vs L/S Overlay",
+         subtitle = "Green = diversifying (negative corr) | Red = correlated drawdowns",
+         x = NULL, y = "Rolling Correlation")
+)
+
+# ── P11: Annual return bars — Core / LS / Combined ───────────────────────────
+ann_p2_df <- data.frame(
+  date         = index(phase2_comp),
+  Core_5050    = as.numeric(phase2_comp[, "Core_5050"]),
+  LS_Core_15   = as.numeric(phase2_comp[, "LS_Core_15"]),
+  Core_plus_LS = as.numeric(phase2_comp[, "Core_plus_LS"])
+) %>%
+  mutate(year = lubridate::year(date)) %>%
+  group_by(year) %>%
+  summarise(across(c(Core_5050, LS_Core_15, Core_plus_LS),
+                   ~ prod(1 + .) - 1), .groups = "drop") %>%
+  pivot_longer(-year, names_to = "Series", values_to = "Return") %>%
+  mutate(Series = factor(Series,
+                         levels = c("Core_5050", "LS_Core_15", "Core_plus_LS")))
+
+print(
+  ggplot(ann_p2_df, aes(x = factor(year), y = Return, fill = Series)) +
+    geom_col(position = "dodge", width = 0.75, alpha = 0.9) +
+    geom_hline(yintercept = 0, colour = "grey40") +
+    scale_fill_manual(values = c(
+      Core_5050    = pal["Core_5050"],
+      LS_Core_15   = pal["LS_Core_15"],
+      Core_plus_LS = pal["Core_plus_LS"]
+    )) +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom",
+          axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "P11: Annual Returns — Core / L/S / Combined",
+         x = NULL, y = "Annual Return", fill = NULL)
+)
+
+# ── P12: Drawdown comparison — overlaid series ────────────────────────────────
+dd_xts <- Drawdowns(phase2_comp)
+
+dd_df <- data.frame(
+  date         = index(dd_xts),
+  Core_5050    = as.numeric(dd_xts[, "Core_5050"]),
+  LS_Core_15   = as.numeric(dd_xts[, "LS_Core_15"]),
+  Core_plus_LS = as.numeric(dd_xts[, "Core_plus_LS"])
+) %>%
+  pivot_longer(-date, names_to = "Series", values_to = "Drawdown") %>%
+  mutate(Series = factor(Series,
+                         levels = c("Core_5050", "LS_Core_15", "Core_plus_LS")))
+
+print(
+  ggplot(dd_df, aes(x = date, y = Drawdown, colour = Series, linewidth = Series)) +
+    geom_line() +
+    geom_hline(yintercept = 0, colour = "grey40") +
+    scale_colour_manual(values = c(
+      Core_5050    = pal["Core_5050"],
+      LS_Core_15   = pal["LS_Core_15"],
+      Core_plus_LS = pal["Core_plus_LS"]
+    )) +
+    scale_linewidth_manual(values = c(Core_5050 = 0.8, LS_Core_15 = 0.8,
+                                      Core_plus_LS = 1.6), guide = "none") +
+    scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+    scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+    labs(title    = "P12: Drawdown Comparison — Core / L/S / Combined",
+         subtitle = "Bold = Core + L/S | Drawdown regimes partially offset across series",
+         x = NULL, y = "Drawdown", colour = NULL)
+)
+
+################################################################################

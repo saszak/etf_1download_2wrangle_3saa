@@ -134,10 +134,10 @@ plot_regime_multi_overlay <- function(xts_ret,
     mutate(year = format(date, "%Y")) %>%
     group_by(year) %>% slice(1) %>% ungroup()
 
-  # ── Current regime badge ──────────────────────────────────────────────────
-  current_regime <- as.character(tail(rt$regime, 1))
-  current_since  <- format(tail(rt$xmin, 1), "%d %b %Y")
-  current_label  <- sprintf("NOW: %s  (since %s)", current_regime, current_since)
+  # # ── Current regime badge ──────────────────────────────────────────────────
+  # current_regime <- as.character(tail(rt$regime, 1))
+  # current_since  <- format(tail(rt$xmin, 1), "%d %b %Y")
+  # current_label  <- sprintf("NOW: %s  (since %s)", current_regime, current_since)
 
   # ── Summary stats ─────────────────────────────────────────────────────────
   total_r <- percent(as.numeric(Return.cumulative(master_r)), accuracy = 0.1)
@@ -234,15 +234,6 @@ plot_regime_multi_overlay <- function(xts_ret,
       hjust = 1.35, size = 3.6, fontface = "bold",
       show.legend = FALSE
     ) +
-
-    # Current regime badge
-    annotate("label",
-             x = max(cum_df$date), y = max_val * 1.0,
-             label    = current_label,
-             hjust = 1, vjust = 1, size = 3.2, fontface = "bold",
-             color    = REGIME_PAL[current_regime],
-             fill     = "white", label.size = 0.5,
-             label.padding = unit(0.3, "lines")) +
 
     # Year footer labels
     geom_text(
@@ -446,7 +437,7 @@ plot_regime_ticker_summary <- function(xts_ret,
         percent(avg_ret, accuracy = 0.1),
       bar_color = REGIME_PAL[as.character(regime)],
       is_master = ticker == master,
-      txt_color = if_else(abs(avg_ret) > 0.05, "white", "grey20")
+      txt_color = if_else(abs(avg_ret) > 0.05, "darkblue", "grey20")
     )
 
   # Within each regime facet, sort by avg_ret descending
@@ -541,11 +532,10 @@ core_universe <- c(
 )
 
 core_universe <- c(
-  "IEF", "HYG",
-  "IEFA", 
-   "XLK", "XLF", "XLI",
-  "GLD"
+  "XLV", "IHI", "IBB"
 )
+
+
 
 # ── Absolute returns per regime ───────────────────────────────────────────────
 run_multi_ticker_regime(

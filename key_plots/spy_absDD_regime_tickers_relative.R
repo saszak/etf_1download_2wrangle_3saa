@@ -8,9 +8,10 @@ library(xts)
 library(timetk)
 library(scales)
 
+base_path=here()
 # 1. LOAD & CLEAN
-xts_abs <- read_rds(file.path(base_path, "data_raw/raw_p_d.rds"))
-xts_rel <- read_rds(file.path(base_path, "01_etf_wrangle/data_processed/rel_ret_d.rds"))
+xts_abs <- read_rds( file.path(base_path, "01_data_raw/raw_data.rds") )
+xts_rel <- read_rds(file.path(base_path, "02_data_processed/xts_rel.rds"))
 
 if ("symbol" %in% colnames(xts_abs)) {
   xts_abs <- xts_abs %>% pivot_wider(names_from = symbol, values_from = adjusted) %>%

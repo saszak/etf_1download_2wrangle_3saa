@@ -1,0 +1,1311 @@
+---
+title: "Sovereign SAA Execution Report"
+subtitle: "3-Book Portfolio · Spring-Load Signals · Sovereign 5 Roster"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+params:
+  fs_ticker: "XLK"
+  fs_bmk:    "SPY"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    code_folding: hide
+    df_print: paged
+    fig_width: 11
+    fig_height: 6
+---
+
+```{css, echo=FALSE}
+body       { font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
+             background: #f4f6fb; }
+h1, h2, h3 { color: #1B2A4A; font-weight: 800; }
+h2         { border-bottom: 2px solid #1B2A4A; padding-bottom: 6px; }
+.section-label {
+  display: inline-block; font-size: 10px; font-weight: 800;
+  letter-spacing: .1em; text-transform: uppercase;
+  padding: 3px 10px; border-radius: 12px; margin-bottom: 8px;
+}
+.lbl-navy  { background:#1B2A4A; color:#fff; }
+.lbl-teal  { background:#1E6E7A; color:#fff; }
+.lbl-gold  { background:#8B6510; color:#fff; }
+.lbl-green { background:#2D6A4F; color:#fff; }
+.lbl-red   { background:#D90429; color:#fff; }
+.metric-row { display:flex; gap:18px; flex-wrap:wrap; margin-bottom:20px; }
+.metric-box {
+  flex:1; min-width:160px; background:#fff; border-radius:6px;
+  padding:14px 18px; box-shadow:0 1px 5px rgba(0,0,0,.08);
+  border-left: 5px solid #1B2A4A;
+}
+.metric-box.teal  { border-left-color:#1E6E7A; }
+.metric-box.gold  { border-left-color:#8B6510; }
+.metric-box.green { border-left-color:#2D6A4F; }
+.metric-box.red   { border-left-color:#D90429; }
+.metric-val  { font-size:28px; font-weight:800; color:#1B2A4A; line-height:1; }
+.metric-lbl  { font-size:10px; font-weight:700; text-transform:uppercase;
+               letter-spacing:.08em; color:#8a94a8; margin-top:5px; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.align = "center")
+library(here)
+library(tidyverse)
+library(scales)
+library(DT)
+library(knitr)
+library(kableExtra)
+library(ggrepel)
+```
+
+```{r run-pipeline, include=FALSE}
+# ── Run the full SAA execution pipeline ──────────────────────────────────────
+# Each script is idempotent: skips work if objects already in env.
+source(here("scripts_saa_execution/saa_bridge_config.R"))
+source(here("scripts_saa_execution/saa_quantdb_builder.R"))
+source(here("scripts_saa_execution/saa_alpha_intelligence.R"))
+source(here("scripts_saa_execution/saa_policy_weights.R"))
+source(here("scripts_saa_execution/saa_drift_analysis.R"))
+source(here("scripts_saa_execution/saa_master_allocator.R"))
+source(here("scripts_saa_execution/saa_visual_dashboard.R"))
+source(here("scripts_saa_execution/saa_perf_attribution.R"))
+source(here("scripts_saa_execution/saa_quantdb_selector.R"))
+source(here("utility/plot_sovereign_tapes.R"))
+```
+
+---
+
+# Executive Summary
+
+<div class="metric-row">
+
+```{r exec-kpis, echo=FALSE, results='asis'}
+# Book 3 metrics
+n_positions <- nrow(execution_list)
+long_wt     <- sum(execution_list$net_weight[execution_list$net_weight > 0])
+short_wt    <- abs(sum(execution_list$net_weight[execution_list$net_weight < 0]))
+n_sl        <- sum(selection_matrix$status == "Spring-Load", na.rm = TRUE)
+n_ex        <- sum(selection_matrix$status == "Exhaustion",  na.rm = TRUE)
+taa_active  <- nrow(policy_list$TAA[policy_list$TAA$book == "BOOK_2_TAA_LONG", ])
+
+cat(sprintf('
+<div class="metric-box">
+  <div class="metric-val">%d</div>
+  <div class="metric-lbl">Total Positions</div>
+</div>
+<div class="metric-box teal">
+  <div class="metric-val">%s</div>
+  <div class="metric-lbl">Long Exposure</div>
+</div>
+<div class="metric-box gold">
+  <div class="metric-val">%d</div>
+  <div class="metric-lbl">Spring-Loads</div>
+</div>
+<div class="metric-box green">
+  <div class="metric-val">%d</div>
+  <div class="metric-lbl">Active TAA Pairs</div>
+</div>
+<div class="metric-box red">
+  <div class="metric-val">%d</div>
+  <div class="metric-lbl">Exhaustions</div>
+</div>',
+n_positions,
+scales::percent(long_wt, accuracy = 0.1),
+n_sl, taa_active, n_ex))
+```
+
+</div>
+
+> **Pipeline date:** `r Sys.Date()` · **Universe:** `r nrow(saa_metadata)` tickers ·
+> **Reference AUM:** $1,000,000
+
+---
+
+# 1 · QuantDB — Ticker Intelligence
+
+<span class="section-label lbl-navy">Stage 1</span>
+
+The `etf_quantdb` is the foundation of the execution pipeline — an 8-layer
+per-ticker database covering absolute performance, relative edge vs SPY,
+and multi-horizon momentum confirmation.
+
+## 1.1 Full QuantDB
+
+```{r quantdb-table}
+etf_quantdb %>%
+  select(ticker, cluster, category,
+         ann_ret, alpha_6y, corr_to_bmk, beta_spy,
+         ann_vol, max_dd, ir_ratio,
+         is_confirmed, mom_d) %>%
+  mutate(across(c(ann_ret, alpha_6y, corr_to_bmk, beta_spy,
+                  ann_vol, max_dd, ir_ratio, mom_d), ~ round(., 3))) %>%
+  DT::datatable(
+    filter    = "top",
+    rownames  = FALSE,
+    class     = "compact stripe",
+    options   = list(pageLength = 15, scrollX = TRUE),
+    caption   = "QuantDB — sorted by cumulative alpha (alpha_6y)"
+  ) %>%
+  DT::formatStyle("alpha_6y",
+    background = DT::styleInterval(0, c("#fdecea", "#e8f5e9")),
+    fontWeight = "bold") %>%
+  DT::formatStyle("is_confirmed",
+    color = DT::styleEqual(c("YES", "NO"), c("#2D6A4F", "#D90429")),
+    fontWeight = "bold")
+```
+
+## 1.2 Alpha Landscape
+
+```{r alpha-landscape, fig.height=7}
+etf_quantdb %>%
+  mutate(label_col = if_else(alpha_6y > 0, "#2D6A4F", "#D90429")) %>%
+  ggplot(aes(x = corr_to_bmk, y = alpha_6y,
+             colour = cluster, size = abs(ann_ret))) +
+  geom_hline(yintercept = 0, colour = "grey60", linewidth = 0.4) +
+  geom_vline(xintercept = 0.5, colour = "grey80",
+             linetype = "dashed", linewidth = 0.4) +
+  geom_point(alpha = 0.75) +
+  ggrepel::geom_text_repel(aes(label = ticker), size = 3,
+                            max.overlaps = 20, show.legend = FALSE) +
+  scale_colour_brewer(palette = "Dark2") +
+  scale_size_continuous(range = c(2, 8), guide = "none") +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title    = "Alpha Landscape: Cumulative Alpha vs Correlation to SPY",
+    subtitle = "Size = |Ann. Return|  |  Dashed line = corr 0.50 (dampener boundary)",
+    x = "Correlation to SPY", y = "Cumulative Alpha (full history)",
+    colour = "Cluster"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid.minor = element_blank(),
+        legend.position  = "right")
+```
+
+## 1.3 DNA Score Ranking
+
+```{r dna-ranking, fig.height=6}
+ranked <- rank_spider_dna()
+
+ranked %>%
+  head(20) %>%
+  ggplot(aes(x = reorder(ticker, dna_score), y = dna_score,
+             fill = dna_score)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = round(dna_score, 2)),
+            hjust = -0.2, size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_fill_gradient(low = "#d8e9ff", high = "#1B2A4A", guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(title    = "Top 20 Tickers by Sovereign DNA Score",
+       subtitle = "Weighted: Alpha ×0.4 · Stability ×0.3 · Momentum ×0.3",
+       x = NULL, y = "DNA Score (0–1)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid.minor = element_blank())
+```
+
+---
+
+# 2 · Alpha Signals — Spring-Load & Exhaustion
+
+<span class="section-label lbl-teal">Stage 2</span>
+
+Each ticker is classified daily along two dimensions:
+
+| Signal | Condition | Interpretation |
+|---|---|---|
+| **Spring-Load** | range_pct < 30% AND above MA200 | Beaten down but structurally intact — coiled for recovery |
+| **Exhaustion** | range_pct > 70% AND below MA200 | Extended but trend broken — potential mean reversion |
+| **Neutral** | All other | No strong signal |
+
+A **LONG quadrant** requires Spring-Load _and_ positive alpha velocity z-score (confirmed momentum building).
+
+## 2.1 Signal Matrix
+
+```{r signal-matrix}
+selection_matrix %>%
+  select(ticker, cluster, status, quadrant,
+         alpha_velocity_z, range_percentile, dist_200, trend_regime) %>%
+  mutate(across(c(alpha_velocity_z, range_percentile, dist_200),
+                ~ round(., 3))) %>%
+  DT::datatable(
+    filter   = "top",
+    rownames = FALSE,
+    class    = "compact stripe",
+    options  = list(pageLength = 15, scrollX = TRUE),
+    caption  = "Selection Matrix — sorted by alpha velocity z-score"
+  ) %>%
+  DT::formatStyle("status",
+    backgroundColor = DT::styleEqual(
+      c("Spring-Load", "Exhaustion", "Neutral"),
+      c("#e8f5e9",      "#fdecea",    "#f5f5f5")),
+    fontWeight = "bold") %>%
+  DT::formatStyle("quadrant",
+    color = DT::styleEqual(
+      c("SPRING_LOAD (LONG)", "EXHAUSTION (SHORT)", "NEUTRAL"),
+      c("#2D6A4F",             "#D90429",             "#888888")),
+    fontWeight = "bold")
+```
+
+## 2.2 Signal Map
+
+```{r signal-map, fig.height=6}
+selection_matrix %>%
+  filter(!is.na(range_percentile), !is.na(dist_200)) %>%
+  mutate(
+    col = case_when(
+      status == "Spring-Load" ~ "#2D6A4F",
+      status == "Exhaustion"  ~ "#D90429",
+      TRUE                    ~ "#aaaaaa"
+    ),
+    alpha_pt = if_else(status == "Neutral", 0.4, 0.9)
+  ) %>%
+  ggplot(aes(x = dist_200, y = range_percentile,
+             colour = col, alpha = alpha_pt)) +
+  annotate("rect", xmin = 0,    xmax = Inf,  ymin = -Inf, ymax = 0.30,
+           fill = "#e8f5e9", alpha = 0.3) +
+  annotate("rect", xmin = -Inf, xmax = 0,    ymin = 0.70,  ymax = Inf,
+           fill = "#fdecea", alpha = 0.3) +
+  geom_hline(yintercept = c(0.30, 0.70), linetype = "dashed",
+             colour = "grey60") +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_point(size = 4) +
+  ggrepel::geom_text_repel(
+    aes(label = ticker), size = 3, max.overlaps = 25, show.legend = FALSE) +
+  scale_colour_identity() +
+  scale_alpha_identity() +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 0.1)) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title    = "Spring-Load / Exhaustion Signal Map",
+    subtitle = "Green zone = Spring-Load candidates  |  Red zone = Exhaustion candidates",
+    x = "Distance from MA200  (dist_200)",
+    y = "52-Week Range Percentile"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid.minor = element_blank())
+```
+
+---
+
+# 3 · Portfolio Construction — The 3 Books
+
+<span class="section-label lbl-gold">Stages 3–5</span>
+
+## 3.1 Book 1 — Sovereign SAA (60 / 40)
+
+```{r book1}
+policy_list$SAA %>%
+  mutate(weight_pct = scales::percent(weight, accuracy = 0.1),
+         dollar     = scales::dollar(weight * 1e6)) %>%
+  kable(col.names = c("Ticker", "Weight", "Book", "Weight %", "$ Value"),
+        align = "lrllr") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE)
+```
+
+## 3.2 Book 2 — TAA Long / Short Synthetics
+
+```{r book2}
+if (nrow(policy_list$TAA) > 0) {
+  policy_list$TAA %>%
+    mutate(weight_pct = scales::percent(weight, accuracy = 0.1),
+           dollar     = scales::dollar(weight * 1e6)) %>%
+    kable(col.names = c("Ticker", "Weight", "Book", "Weight %", "$ Value"),
+          align = "lrllr") %>%
+    kable_styling(bootstrap_options = c("striped", "condensed"),
+                  full_width = FALSE)
+} else {
+  cat("> **Book 2 is flat** — no Spring-Loads qualified this cycle.")
+}
+```
+
+## 3.3 Book 3 — Total Net Exposure
+
+```{r book3-bar, fig.height=5}
+print(p_book3_weights)
+```
+
+```{r book3-table}
+execution_list %>%
+  select(ticker, cluster, category, net_weight, weight_pct,
+         target_value_fmt, action) %>%
+  kable(col.names = c("Ticker", "Cluster", "Category",
+                      "Net Wt", "Wt %", "$ Target", "Action"),
+        align = "llllrrl") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>%
+  row_spec(which(execution_list$action == "SHORT/SELL"),
+           color = "#D90429", bold = TRUE) %>%
+  row_spec(which(execution_list$action == "BUY/HOLD"),
+           color = "#2D6A4F")
+```
+
+## 3.4 Cluster Drift Audit
+
+```{r drift-chart, fig.height=5}
+crowding_summary %>%
+  ggplot(aes(x = reorder(cluster, total_net_exposure),
+             y = total_net_exposure, fill = total_net_exposure)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = scales::percent(total_net_exposure, accuracy = 0.1)),
+            hjust = -0.2, size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_fill_gradient2(low = "#D90429", mid = "#f5f5f5", high = "#1B2A4A",
+                       midpoint = 0, guide = "none") +
+  scale_y_continuous(labels = scales::percent,
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(title    = "Book 3: Net Exposure by Cluster",
+       subtitle = "After applying 60/40 SAA + TAA LS synthetics",
+       x = NULL, y = "Net Weight") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid.minor = element_blank())
+```
+
+## 3.5 Treemap — SAA vs TAA (Book 3)
+
+```{r treemap-setup, include=FALSE}
+library(treemapify)
+library(patchwork)
+library(plotly)
+source(here("scripts_saa_taa/saa_tree.R"))
+source(here("key_plots/saa_treemap_templates.R"))
+
+# Cluster → role mapping for execution universe
+.cluster_to_role <- c(
+  "Broad Market"      = "Anchor",
+  "Sovereign/BMK"     = "Anchor",
+  "Broad Bonds"       = "Core-Stabilizer",
+  "Cash/Ultra-Short"  = "Core-Stabilizer",
+  "Defensive Bulwark" = "Core-Stabilizer",
+  "Factor Play"       = "Core-Growth",
+  "Growth Laggards"   = "Core-Growth",
+  "Cycle & Breadth"   = "Core-Growth",
+  "Pipes & Power"     = "Core-Growth",
+  "Multipolar Alpha"  = "Satellite"
+)
+
+# Build TAA (Book 3 long positions) compatible with treemap functions
+.build_taa_tm_df <- function(drift_report, xts_ret) {
+  ytd_tickers <- drift_report$ticker[drift_report$net_weight > 0]
+  ytd_vals    <- calc_ytd(xts_ret, ytd_tickers)
+
+  drift_report %>%
+    filter(net_weight > 0) %>%
+    mutate(
+      weight      = net_weight,
+      role        = coalesce(.cluster_to_role[cluster], "Core-Growth"),
+      asset_class = case_when(
+        category == "Fixed" ~ "Fixed Income",
+        category == "Alt"   ~ "Alternatives",
+        category == "Multi" ~ "Multi-Asset",
+        TRUE                ~ "Equity"
+      ),
+      ytd       = ytd_vals[ticker],
+      ytd_label = if_else(
+        is.na(ytd), "n/a",
+        paste0(if_else(ytd >= 0, "+", ""),
+               scales::percent(ytd, accuracy = 0.1))
+      ),
+      leaf_fill  = case_when(
+        is.na(ytd) ~ ROLE_PAL[role],
+        ytd >= 0   ~ "#40916C",
+        TRUE       ~ "#C1121F"
+      ),
+      cell_label = paste0(ticker, "\n",
+                          scales::percent(weight, accuracy = 0.1),
+                          "\n", ytd_label)
+    )
+}
+
+saa_tm_df <- build_treemap_df(xts_ret) %>%
+  mutate(
+    leaf_fill = if ("ytd" %in% names(.)) {
+      case_when(is.na(ytd) ~ unname(ROLE_PAL[role]),
+                ytd >= 0   ~ "#40916C",
+                TRUE       ~ "#C1121F")
+    } else unname(ROLE_PAL[role])
+  )
+taa_tm_df <- .build_taa_tm_df(drift_report, xts_ret) %>%
+  mutate(leaf_fill = unname(leaf_fill))
+```
+
+```{r treemap-side-by-side, fig.width=13, fig.height=5}
+# ── SAA treemap (Book 1) ──────────────────────────────────────────────────────
+p_tm_saa <- ggplot(saa_tm_df,
+    aes(area = weight, fill = leaf_fill,
+        label = cell_label, subgroup = asset_class)) +
+  treemapify::geom_treemap(colour = "white", size = 2) +
+  treemapify::geom_treemap_subgroup_border(colour = "white", size = 5) +
+  treemapify::geom_treemap_subgroup_text(
+    place = "topleft", colour = "white",
+    fontface = "bold", size = 13, alpha = 0.7, grow = FALSE) +
+  treemapify::geom_treemap_text(
+    colour = "white", fontface = "bold",
+    size = 11, place = "centre", grow = FALSE) +
+  scale_fill_identity() +
+  theme_void() +
+  theme(plot.title    = element_text(face = "bold", size = 13,
+                                     colour = "#1B2A4A",
+                                     margin = margin(b = 4)),
+        plot.subtitle = element_text(size = 9, colour = "grey50",
+                                     margin = margin(b = 6))) +
+  labs(title    = "SAA — Book 1 (60% SPY · 40% AGG baseline)",
+       subtitle = paste0("Area = weight  |  Colour = YTD  |  ",
+                         format(Sys.Date(), "%d %b %Y")))
+
+# ── TAA treemap (Book 3 long positions) ───────────────────────────────────────
+p_tm_taa <- ggplot(taa_tm_df,
+    aes(area = weight, fill = leaf_fill,
+        label = cell_label, subgroup = asset_class)) +
+  treemapify::geom_treemap(colour = "white", size = 2) +
+  treemapify::geom_treemap_subgroup_border(colour = "white", size = 5) +
+  treemapify::geom_treemap_subgroup_text(
+    place = "topleft", colour = "white",
+    fontface = "bold", size = 13, alpha = 0.7, grow = FALSE) +
+  treemapify::geom_treemap_text(
+    colour = "white", fontface = "bold",
+    size = 11, place = "centre", grow = FALSE) +
+  scale_fill_identity() +
+  theme_void() +
+  theme(plot.title    = element_text(face = "bold", size = 13,
+                                     colour = "#1B2A4A",
+                                     margin = margin(b = 4)),
+        plot.subtitle = element_text(size = 9, colour = "grey50",
+                                     margin = margin(b = 6))) +
+  labs(title    = "TAA — Book 3 Net (SAA + LS overlay, long positions)",
+       subtitle = "Area = net weight  |  Colour = YTD  |  Excludes short legs")
+
+p_tm_saa + p_tm_taa
+```
+
+## 3.6 Sunburst — SAA vs TAA (Book 3)
+
+```{r sunburst-side-by-side, fig.width=13, fig.height=6}
+# Helper: build plotly sunburst from any portfolio df
+.make_sunburst <- function(df, title_text) {
+  # 2-ring: asset_class (inner) → ticker (outer)
+  ac_rows <- df %>%
+    group_by(asset_class) %>%
+    summarise(weight = sum(weight), .groups = "drop") %>%
+    mutate(
+      ids     = asset_class,
+      labels  = asset_class,
+      parents = "",
+      values  = weight,
+      text    = scales::percent(weight, accuracy = 0.1)
+    )
+
+  tk_rows <- df %>%
+    mutate(
+      ids     = paste0(asset_class, " - ", ticker),
+      labels  = ticker,
+      parents = asset_class,
+      values  = weight,
+      text    = if ("ytd_label" %in% names(.))
+                  paste0(scales::percent(weight, accuracy = 0.1),
+                         "  YTD ", ytd_label)
+                else scales::percent(weight, accuracy = 0.1)
+    ) %>%
+    select(ids, labels, parents, values, text)
+
+  all_rows <- bind_rows(ac_rows %>% select(ids, labels, parents, values, text),
+                        tk_rows)
+
+  plotly::plot_ly(
+    ids     = all_rows$ids,
+    labels  = all_rows$labels,
+    parents = all_rows$parents,
+    values  = all_rows$values,
+    text    = all_rows$text,
+    type    = "sunburst",
+    branchvalues = "total",
+    hovertemplate = "%{label}<br>%{text}<extra></extra>",
+    textinfo = "label+percent entry",
+    insidetextorientation = "radial"
+  ) %>%
+  plotly::layout(
+    title = list(text = title_text, font = list(size = 13, color = "#1B2A4A")),
+    margin = list(t = 40, b = 10, l = 10, r = 10)
+  )
+}
+
+p_sb_saa <- .make_sunburst(saa_tm_df,  "SAA · Book 1")
+p_sb_taa <- .make_sunburst(taa_tm_df,  "TAA · Book 3 Net")
+
+plotly::subplot(p_sb_saa, p_sb_taa, nrows = 1) %>%
+  plotly::layout(
+    title = list(
+      text = "Sunburst: SAA (Book 1)  vs  TAA Book 3 Net",
+      font = list(size = 14, color = "#1B2A4A")
+    )
+  )
+```
+
+---
+
+# 4 · Sovereign 5 Roster
+
+<span class="section-label lbl-green">Selector</span>
+
+The Sovereign 5 are selected from the QuantDB each cycle:
+- **3 Enhancers** — highest `(alpha_6y × 0.7) + (mom_d × 0.3)` with confirmed momentum
+- **2 Dampeners** — lowest tail risk `(−|kurtosis| − |skew|)` among tickers with `corr < 0.50`
+
+## 4.1 Roster
+
+```{r sovereign-roster}
+sovereign_list %>%
+  select(ticker, cluster, role, goal, alpha_6y, corr_to_bmk, is_confirmed) %>%
+  mutate(alpha_6y = scales::percent(alpha_6y, accuracy = 0.1),
+         corr_to_bmk = round(corr_to_bmk, 3)) %>%
+  kable(col.names = c("Ticker", "Cluster", "Role", "Goal",
+                      "Cum. Alpha", "Corr SPY", "Confirmed"),
+        align = "lllllrr") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed")) %>%
+  row_spec(which(sovereign_list$role == "ENHANCER"),
+           background = "#e8f5e9") %>%
+  row_spec(which(sovereign_list$role == "DAMPENER"),
+           background = "#e8f0fb")
+```
+
+## 4.2 Sovereign DNA — Vertical Spider
+
+```{r sovereign-spider, fig.width=12, fig.height=14}
+if (nrow(sovereign_list) > 0) {
+  plot_etf_spider_vertical(c(sovereign_list$ticker, "SPY"))
+}
+```
+
+---
+
+# 5 · TAA Performance Attribution
+
+<span class="section-label lbl-teal">Attribution</span>
+
+```{r taa-stats}
+if (nrow(taa_stats) > 0) {
+  taa_stats %>%
+    select(Metric, Value) %>%
+    mutate(Value = round(Value, 4)) %>%
+    kable(align = "lr") %>%
+    kable_styling(bootstrap_options = c("striped", "condensed"),
+                  full_width = FALSE)
+} else {
+  cat("> TAA Book 2 is flat — no attribution to show.")
+}
+```
+
+```{r taa-chart, fig.height=5}
+print(p_taa_cum_alpha)
+```
+
+---
+
+# 6 · Regime Alpha Tape
+
+<span class="section-label lbl-navy">Regime Context</span>
+
+SPY row shows **absolute** returns; all other rows show **alpha** (relative return
+vs SPY).  Vertical markers = SPY drawdown entry (dashed) and recovery exit
+(dotted).  Quarterly x-axis for precision dating.
+
+## 6.1 Defensive Bulwark
+
+```{r tape-defensive, fig.height=6}
+def_tickers <- defensive_tickers[defensive_tickers %in% colnames(xts_d_rel)]
+if (length(def_tickers) > 0) {
+  plot_sovereign_alpha_tape_v12(
+    xts_abs        = xts_d_abs,
+    xts_rel        = xts_d_rel,
+    target_tickers = head(def_tickers, 5),
+    dd_threshold   = 0.10
+  )
+}
+```
+
+## 6.2 Cycle & Breadth
+
+```{r tape-cycle, fig.height=6}
+cyc_tickers <- cycle_tickers[cycle_tickers %in% colnames(xts_d_rel)]
+if (length(cyc_tickers) > 0) {
+  plot_sovereign_alpha_tape_v12(
+    xts_abs        = xts_d_abs,
+    xts_rel        = xts_d_rel,
+    target_tickers = head(cyc_tickers, 5),
+    dd_threshold   = 0.10
+  )
+}
+```
+
+## 6.3 Sovereign 5 in Context
+
+```{r tape-sovereign5, fig.height=6}
+if (nrow(sovereign_list) > 0) {
+  s5 <- sovereign_list$ticker[sovereign_list$ticker %in% colnames(xts_d_rel)]
+  plot_sovereign_alpha_tape_v12(
+    xts_abs        = xts_d_abs,
+    xts_rel        = xts_d_rel,
+    target_tickers = s5,
+    dd_threshold   = 0.10
+  )
+}
+```
+
+---
+
+# 7 · Execution List
+
+<span class="section-label lbl-gold">Output</span>
+
+```{r exec-list}
+execution_list %>%
+  select(ticker, cluster, category, net_weight,
+         weight_pct, target_value_fmt, action) %>%
+  DT::datatable(
+    rownames = FALSE,
+    class    = "compact stripe",
+    options  = list(pageLength = 20, dom = "tp"),
+    caption  = paste("Trade list generated:", Sys.Date())
+  ) %>%
+  DT::formatStyle("action",
+    backgroundColor = DT::styleEqual(
+      c("BUY/HOLD", "SHORT/SELL", "FLAT"),
+      c("#e8f5e9",  "#fdecea",    "#f5f5f5")),
+    fontWeight = "bold") %>%
+  DT::formatStyle("net_weight",
+    background = DT::styleColorBar(
+      range(execution_list$net_weight), "#d0e8ff"),
+    backgroundSize = "100% 70%",
+    backgroundRepeat = "no-repeat",
+    backgroundPosition = "center")
+```
+
+---
+
+---
+
+# 8 · IC Alignment — Institutional vs Sovereign Signals
+
+<span class="section-label lbl-navy">IC Grid · 13-Mar-2026</span>
+
+Compares the Investment Committee's TAA active weights (MAC USD · BAL profile)
+against our own Spring-Load / Exhaustion signals and QuantDB momentum.
+**Green = aligned · Red = conflicted · Grey = IC has no view on this ticker.**
+
+```{r ic-load, include=FALSE}
+source(here("input/ic_grid_signals.R"))
+```
+
+## 8.1 IC TAA Signal Map (USD · BAL)
+
+```{r ic-bar, fig.height=6}
+ic_bal_usd %>%
+  filter(!is.na(etf_proxy)) %>%
+  mutate(
+    fill_col = case_when(
+      direction == "BUY"  ~ "#2D6A4F",
+      direction == "SELL" ~ "#D90429",
+      TRUE                ~ "#aaaaaa"
+    ),
+    label = paste0(ifelse(delta > 0, "+", ""),
+                   round(delta * 100, 1), "%")
+  ) %>%
+  ggplot(aes(x = reorder(etf_proxy, delta),
+             y = delta, fill = fill_col)) +
+  geom_col(width = 0.75) +
+  geom_text(aes(label = label,
+                hjust = ifelse(delta >= 0, -0.2, 1.2)),
+            size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_fill_identity() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 0.1),
+                     expand = expansion(mult = c(0.15, 0.15))) +
+  geom_hline(yintercept = 0, colour = "grey40", linewidth = 0.4) +
+  labs(
+    title    = "IC TAA Active Weights — USD / BAL",
+    subtitle = "Green = IC overweight vs SAA  |  Red = IC underweight vs SAA",
+    x = NULL, y = "TAA Δ (active weight vs SAA)",
+    caption  = "Source: IC Active Weights Overview, 13-Mar-2026"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid.minor = element_blank())
+```
+
+## 8.2 Alignment Table — IC vs Sovereign Signals
+
+```{r ic-alignment}
+# Join IC BAL/USD signals with our selection matrix and quantdb
+ic_joined <- ic_bal_usd %>%
+  filter(!is.na(etf_proxy)) %>%
+  select(etf_proxy, ic_name, asset_class, delta,
+         direction, signal_tier, conviction) %>%
+  left_join(
+    selection_matrix %>%
+      select(ticker, cluster, status, quadrant, alpha_velocity_z, dist_200),
+    by = c("etf_proxy" = "ticker")
+  ) %>%
+  left_join(
+    etf_quantdb %>% select(ticker, ann_ret, alpha_6y,
+                            corr_to_bmk, is_confirmed, mom_d),
+    by = c("etf_proxy" = "ticker")
+  ) %>%
+  mutate(
+    # Alignment: does our signal agree with IC direction?
+    our_direction = case_when(
+      status == "Spring-Load" ~ "BUY",
+      status == "Exhaustion"  ~ "SELL",
+      mom_d > 0.5             ~ "BUY",
+      mom_d < -0.5            ~ "SELL",
+      TRUE                    ~ "NEUTRAL"
+    ),
+    alignment = case_when(
+      our_direction == direction             ~ "ALIGNED",
+      our_direction == "NEUTRAL"             ~ "NO SIGNAL",
+      TRUE                                   ~ "CONFLICT"
+    ),
+    align_col = case_when(
+      alignment == "ALIGNED"    ~ "#e8f5e9",
+      alignment == "CONFLICT"   ~ "#fdecea",
+      TRUE                      ~ "#f5f5f5"
+    )
+  ) %>%
+  arrange(desc(abs(delta)))
+
+ic_joined %>%
+  select(etf_proxy, asset_class, ic_name,
+         delta, direction, signal_tier,
+         our_direction, alignment, alpha_6y, mom_d) %>%
+  mutate(
+    delta    = scales::percent(delta, accuracy = 0.1),
+    alpha_6y = scales::percent(alpha_6y, accuracy = 0.1),
+    mom_d    = round(mom_d, 2)
+  ) %>%
+  DT::datatable(
+    rownames = FALSE,
+    class    = "compact stripe",
+    options  = list(pageLength = 20, dom = "tp"),
+    caption  = "IC direction vs Sovereign signals (USD/BAL · 13-Mar-2026)"
+  ) %>%
+  DT::formatStyle("alignment",
+    backgroundColor = DT::styleEqual(
+      c("ALIGNED", "CONFLICT", "NO SIGNAL"),
+      c("#e8f5e9",  "#fdecea",  "#f5f5f5")),
+    fontWeight = "bold") %>%
+  DT::formatStyle("direction",
+    color = DT::styleEqual(
+      c("BUY", "SELL", "HOLD"),
+      c("#2D6A4F", "#D90429", "#888888")),
+    fontWeight = "bold")
+```
+
+## 8.3 Alignment Summary
+
+```{r ic-summary, fig.height=4}
+align_summary <- ic_joined %>%
+  count(alignment) %>%
+  mutate(
+    fill_col = case_when(
+      alignment == "ALIGNED"   ~ "#2D6A4F",
+      alignment == "CONFLICT"  ~ "#D90429",
+      TRUE                     ~ "#aaaaaa"
+    ),
+    pct = scales::percent(n / sum(n), accuracy = 1)
+  )
+
+ggplot(align_summary, aes(x = reorder(alignment, n),
+                           y = n, fill = fill_col)) +
+  geom_col(width = 0.6) +
+  geom_text(aes(label = paste0(n, "  (", pct, ")")),
+            hjust = -0.15, size = 4, fontface = "bold") +
+  coord_flip() +
+  scale_fill_identity() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.25))) +
+  labs(title    = "Sovereign Signal Alignment with IC TAA",
+       subtitle = "USD / BAL · 13-Mar-2026",
+       x = NULL, y = "Number of ETF positions") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid.minor = element_blank())
+```
+
+## 8.4 IC Signal Strength by Profile (USD)
+
+```{r ic-profile-heatmap, fig.height=5}
+ic_signals %>%
+  filter(ccy == "USD", !is.na(etf_proxy)) %>%
+  mutate(profile = factor(profile, levels = c("INC", "BAL", "GRO"))) %>%
+  ggplot(aes(x = profile, y = reorder(etf_proxy, abs(delta)),
+             fill = delta)) +
+  geom_tile(colour = "white", linewidth = 0.5) +
+  geom_text(aes(label = paste0(ifelse(delta > 0, "+", ""),
+                               round(delta * 100, 1), "%")),
+            size = 3, fontface = "bold",
+            colour = ifelse(abs(ic_signals %>%
+                                  filter(ccy=="USD", !is.na(etf_proxy)) %>%
+                                  pull(delta)) > 0.04,
+                            "white", "#1B2A4A")) +
+  scale_fill_gradient2(low = "#D90429", mid = "#f5f5f5", high = "#2D6A4F",
+                       midpoint = 0, name = "TAA Δ",
+                       labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title    = "IC TAA Active Weights — USD · All Profiles",
+    subtitle = "INC = Income · BAL = Balanced · GRO = Growth",
+    x = "Risk Profile", y = NULL,
+    caption  = "Source: IC Active Weights Overview, 13-Mar-2026"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid       = element_blank(),
+        axis.text.y      = element_text(face = "bold"))
+```
+
+## 8.5 Cumulative Return by Risk Profile — SAA vs TAA
+
+Portfolio returns are computed from the **ETF-proxied subset** of each IC
+profile's weights. Weights are rescaled to sum to 1 within the mapped universe
+(untranslatable positions — AI Hedge Funds, S&P 500 hedge overlay — are
+excluded). Both the SAA baseline and the TAA active allocation are shown,
+benchmarked against SPY.
+
+```{r ic-cumret, fig.height=7}
+library(PerformanceAnalytics)
+
+# ── Helper: build daily portfolio return series from IC weights ───────────────
+.ic_portfolio_ret <- function(profile_id, weight_col = "taa") {
+
+  w <- ic_signals %>%
+    filter(ccy == "USD", profile == profile_id, !is.na(etf_proxy)) %>%
+    select(etf_proxy, wt = all_of(weight_col)) %>%
+    filter(wt != 0,
+           etf_proxy %in% colnames(xts_d_abs))
+
+  if (nrow(w) == 0) return(NULL)
+
+  # Rescale to sum to 1 (proxy-universe normalisation)
+  w <- w %>% mutate(wt = wt / sum(abs(wt)) * sign(sum(wt)))
+
+  ret_subset <- xts_d_abs[, w$etf_proxy, drop = FALSE]
+
+  # Weighted daily return: matrix multiply
+  wt_vec <- setNames(w$wt, w$etf_proxy)
+  port_ret <- xts(
+    as.numeric(ret_subset %*% wt_vec[colnames(ret_subset)]),
+    order.by = zoo::index(ret_subset)
+  )
+  port_ret
+}
+
+# Build all 6 series (3 profiles × SAA / TAA)
+profiles <- c("INC", "BAL", "GRO")
+
+cum_list <- purrr::map_df(profiles, function(p) {
+  r_saa <- .ic_portfolio_ret(p, "saa")
+  r_taa <- .ic_portfolio_ret(p, "taa")
+
+  bind_rows(
+    if (!is.null(r_saa)) data.frame(
+      Date    = zoo::index(r_saa),
+      CumRet  = as.numeric(cumprod(1 + zoo::coredata(r_saa)) - 1),
+      Profile = p,
+      Type    = "SAA"
+    ),
+    if (!is.null(r_taa)) data.frame(
+      Date    = zoo::index(r_taa),
+      CumRet  = as.numeric(cumprod(1 + zoo::coredata(r_taa)) - 1),
+      Profile = p,
+      Type    = "TAA"
+    )
+  )
+})
+
+# Add SPY benchmark
+spy_ret  <- xts_d_abs[, "SPY"]
+spy_cum  <- data.frame(
+  Date    = zoo::index(spy_ret),
+  CumRet  = as.numeric(cumprod(1 + zoo::coredata(spy_ret)) - 1),
+  Profile = "SPY",
+  Type    = "BMK"
+)
+
+plot_df <- bind_rows(cum_list, spy_cum) %>%
+  mutate(
+    Profile = factor(Profile, levels = c("INC", "BAL", "GRO", "SPY")),
+    Type    = factor(Type,    levels = c("SAA", "TAA", "BMK")),
+    series  = paste0(Profile, " ", Type),
+    line_col = case_when(
+      Type == "BMK"                   ~ "#333333",
+      Type == "TAA" & Profile == "INC" ~ "#1E6E7A",
+      Type == "SAA" & Profile == "INC" ~ "#7FC8D4",
+      Type == "TAA" & Profile == "BAL" ~ "#1B2A4A",
+      Type == "SAA" & Profile == "BAL" ~ "#7A90C0",
+      Type == "TAA" & Profile == "GRO" ~ "#8B6510",
+      Type == "SAA" & Profile == "GRO" ~ "#D4B870",
+      TRUE                             ~ "#aaaaaa"
+    ),
+    line_type = if_else(Type == "SAA", "dashed", "solid"),
+    line_size = if_else(Type == "BMK", 1.2, 0.9)
+  )
+
+ggplot(plot_df, aes(x = Date, y = CumRet,
+                    colour    = line_col,
+                    linetype  = line_type,
+                    linewidth = line_size,
+                    group     = series)) +
+  geom_hline(yintercept = 0, colour = "grey70", linewidth = 0.3) +
+  geom_line(alpha = 0.9) +
+  scale_colour_identity() +
+  scale_linetype_identity() +
+  scale_linewidth_identity() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  facet_wrap(~Profile, ncol = 1, scales = "free_y") +
+  labs(
+    title    = "IC Portfolio Cumulative Returns — USD · SAA vs TAA",
+    subtitle = "Solid = TAA active  |  Dashed = SAA baseline  |  Black = SPY benchmark\nWeights rescaled to ETF-proxied universe (excludes AI HF & S&P hedge overlay)",
+    x = NULL, y = "Cumulative Return",
+    caption  = "IC weights: 13-Mar-2026  ·  Returns: full available history"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+    panel.grid.minor = element_blank(),
+    strip.text       = element_text(face = "bold", size = 11),
+    strip.background = element_rect(fill = "#f0f3f8", colour = NA)
+  )
+```
+
+```{r ic-cumret-combined, fig.height=5}
+# ── Combined: all 3 TAA profiles + SPY on a single panel ─────────────────────
+taa_only_df <- plot_df %>%
+  filter(Type %in% c("TAA", "BMK"))
+
+# Annualised return per series for end labels
+.ann_ret_vec <- function(ret_xts) {
+  rv <- as.numeric(zoo::coredata(ret_xts))
+  mean(rv[!is.na(rv)]) * 252
+}
+
+ann_ret_map <- bind_rows(
+  purrr::map_df(profiles, function(p) {
+    r <- .ic_portfolio_ret(p, "taa")
+    if (is.null(r)) return(NULL)
+    tibble(series = paste0(p, " TAA"), ann_ret = .ann_ret_vec(r))
+  }),
+  tibble(series = "SPY BMK", ann_ret = .ann_ret_vec(spy_ret))
+)
+
+end_labels <- taa_only_df %>%
+  group_by(series) %>%
+  slice_max(Date, n = 1) %>%
+  ungroup() %>%
+  left_join(ann_ret_map, by = "series") %>%
+  mutate(
+    profile_short = sub(" .*", "", series),
+    label = paste0(profile_short, "  ",
+                   scales::percent(ann_ret, accuracy = 0.1))
+  )
+
+ggplot(taa_only_df, aes(x = Date, y = CumRet,
+                        colour    = line_col,
+                        linewidth = line_size,
+                        group     = series)) +
+  geom_hline(yintercept = 0, colour = "grey70", linewidth = 0.3) +
+  geom_line(alpha = 0.9) +
+  ggrepel::geom_text_repel(
+    data          = end_labels,
+    aes(label = label, colour = line_col),
+    size          = 3.5,
+    fontface      = "bold",
+    direction     = "y",
+    nudge_x       = 120,
+    hjust         = 0,
+    segment.size  = 0.3,
+    segment.alpha = 0.5,
+    show.legend   = FALSE
+  ) +
+  scale_colour_identity() +
+  scale_linewidth_identity() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y",
+               expand = expansion(mult = c(0.02, 0.12))) +
+  labs(
+    title    = "IC TAA All Profiles vs SPY — Cumulative Return",
+    subtitle = "INC · BAL · GRO (TAA active weights)  |  Black = SPY benchmark\nLabels = annualised return over full history",
+    x = NULL, y = "Cumulative Return",
+    caption  = "IC weights: 13-Mar-2026  ·  Returns: full available history"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r ic-cumret-stats}
+# Risk/return stats per series
+# Base R max drawdown — avoids PerformanceAnalytics date-rowname requirement
+.base_maxdd <- function(x) {
+  cum      <- cumprod(1 + x) - 1
+  high_wat <- cummax(cum)
+  min(cum - high_wat)          # always <= 0
+}
+
+stats_df <- purrr::map_df(profiles, function(p) {
+  purrr::map_df(c("saa", "taa"), function(wt_col) {
+    r <- .ic_portfolio_ret(p, wt_col)
+    if (is.null(r)) return(NULL)
+    rv <- as.numeric(zoo::coredata(r))
+    rv <- rv[!is.na(rv)]
+    tibble(
+      Profile = p,
+      Type    = toupper(wt_col),
+      Ann_Ret = mean(rv) * 252,
+      Ann_Vol = sd(rv)   * sqrt(252),
+      Sharpe  = (mean(rv) * 252) / (sd(rv) * sqrt(252)),
+      Max_DD  = .base_maxdd(rv)
+    )
+  })
+}) %>%
+  mutate(across(c(Ann_Ret, Ann_Vol, Sharpe, Max_DD), ~ round(., 3)))
+
+stats_df %>%
+  mutate(
+    Ann_Ret = scales::percent(Ann_Ret, accuracy = 0.1),
+    Ann_Vol = scales::percent(Ann_Vol, accuracy = 0.1),
+    Max_DD  = scales::percent(-Max_DD, accuracy = 0.1)
+  ) %>%
+  kable(col.names = c("Profile", "Type", "Ann. Return",
+                      "Ann. Vol", "Sharpe", "Max DD"),
+        align = "llrrrr",
+        caption = "IC portfolio risk/return — ETF proxy universe · full history") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                full_width = FALSE) %>%
+  row_spec(which(stats_df$Type == "TAA"), bold = TRUE)
+```
+
+## 8.6 BAL Sub-Portfolio Analysis — FI & Equity
+
+<span class="section-label lbl-navy">BAL · USD · SAA weights</span>
+
+Deep-dive on the two core building blocks of the BAL SAA: the **Fixed Income
+sub-portfolio** (`bal_fi_pf`: LQD / IEF / HYG / EMB, normalised to 100%) and
+the **Equity sub-portfolio** (`bal_eq_pf`: URTH / SPY / AAXJ, normalised to
+100%). Each is benchmarked against its natural reference — AGG for FI, URTH for
+Equity.
+
+```{r bal-load, include=FALSE}
+source(here("input/bal_saa_portfolios.R"))
+```
+
+```{r bal-weights, fig.width=11, fig.height=4}
+# ── Weight bar charts side-by-side ────────────────────────────────────────────
+fi_pal  <- c(LQD = "#1B2A4A", IEF = "#2E5073", HYG = "#C1121F", EMB = "#8B6510")
+eq_pal  <- c(URTH = "#1E6E7A", SPY = "#2D6A4F", AAXJ = "#8B6510")
+
+p_fi_bar <- ggplot(bal_fi_pf,
+    aes(x = reorder(etf_proxy, -weight), y = weight, fill = etf_proxy)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = scales::percent(weight, accuracy = 0.1)),
+            vjust = -0.4, fontface = "bold", size = 4) +
+  scale_fill_manual(values = fi_pal) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "bal_fi_pf — Fixed Income",
+       subtitle = "Weights normalised to 100%",
+       x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor   = element_blank())
+
+p_eq_bar <- ggplot(bal_eq_pf,
+    aes(x = reorder(etf_proxy, -weight), y = weight, fill = etf_proxy)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = scales::percent(weight, accuracy = 0.1)),
+            vjust = -0.4, fontface = "bold", size = 4) +
+  scale_fill_manual(values = eq_pal) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "bal_eq_pf — Equity",
+       subtitle = "Weights normalised to 100%",
+       x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor   = element_blank())
+
+p_fi_bar + p_eq_bar
+```
+
+```{r bal-cumret, fig.width=11, fig.height=5}
+# ── Helper: build portfolio return series from a bal_*_pf tibble ──────────────
+.pf_ret <- function(pf_df, ret_xts = xts_d_abs) {
+  tickers_ok <- pf_df$etf_proxy[pf_df$etf_proxy %in% colnames(ret_xts)]
+  w <- pf_df %>%
+    filter(etf_proxy %in% tickers_ok) %>%
+    mutate(weight = weight / sum(weight))        # re-normalise after any drops
+  ret_subset <- ret_xts[, w$etf_proxy, drop = FALSE]
+  wt_vec     <- setNames(w$weight, w$etf_proxy)
+  xts(as.numeric(ret_subset %*% wt_vec[colnames(ret_subset)]),
+      order.by = zoo::index(ret_subset))
+}
+
+# Build series
+r_fi   <- .pf_ret(bal_fi_pf)
+r_eq   <- .pf_ret(bal_eq_pf)
+r_agg  <- xts_d_abs[, "AGG"]
+r_urth <- xts_d_abs[, "URTH"]
+
+.to_cum_df <- function(ret_xts, label) {
+  data.frame(Date   = zoo::index(ret_xts),
+             CumRet = as.numeric(cumprod(1 + zoo::coredata(ret_xts)) - 1),
+             Series = label)
+}
+
+cum_bal <- bind_rows(
+  .to_cum_df(r_fi,   "bal_fi_pf"),
+  .to_cum_df(r_eq,   "bal_eq_pf"),
+  .to_cum_df(r_agg,  "AGG (FI bmk)"),
+  .to_cum_df(r_urth, "URTH (EQ bmk)")
+) %>%
+  mutate(
+    colour    = case_when(
+      Series == "bal_fi_pf"     ~ "#1B2A4A",
+      Series == "AGG (FI bmk)"  ~ "#7A90C0",
+      Series == "bal_eq_pf"     ~ "#1E6E7A",
+      Series == "URTH (EQ bmk)" ~ "#7FC8D4"
+    ),
+    linetype  = if_else(grepl("bmk", Series), "dashed", "solid"),
+    linewidth = if_else(grepl("bmk", Series), 0.7, 1.1)
+  )
+
+# End labels with Ann.Ret
+.ann_ret <- function(r) mean(as.numeric(zoo::coredata(r)), na.rm = TRUE) * 252
+
+end_lbl <- cum_bal %>%
+  group_by(Series) %>% slice_max(Date, n = 1) %>% ungroup() %>%
+  mutate(
+    ann_ret = c(.ann_ret(r_fi), .ann_ret(r_eq),
+                .ann_ret(r_agg), .ann_ret(r_urth))[
+      match(Series, c("bal_fi_pf","bal_eq_pf","AGG (FI bmk)","URTH (EQ bmk)"))],
+    label = paste0(Series, "  ", scales::percent(ann_ret, accuracy = 0.1))
+  )
+
+ggplot(cum_bal, aes(x = Date, y = CumRet,
+                    colour = colour, linetype = linetype,
+                    linewidth = linewidth, group = Series)) +
+  geom_hline(yintercept = 0, colour = "grey70", linewidth = 0.3) +
+  geom_line(alpha = 0.9) +
+  ggrepel::geom_text_repel(
+    data = end_lbl, aes(label = label, colour = colour),
+    size = 3.3, fontface = "bold", direction = "y",
+    nudge_x = 120, hjust = 0,
+    segment.size = 0.3, segment.alpha = 0.5, show.legend = FALSE
+  ) +
+  scale_colour_identity() +
+  scale_linetype_identity() +
+  scale_linewidth_identity() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y",
+               expand = expansion(mult = c(0.02, 0.14))) +
+  labs(
+    title    = "BAL Sub-Portfolios — Cumulative Return vs Benchmark",
+    subtitle = "Solid = sub-portfolio  |  Dashed = benchmark  |  Labels = ann. return",
+    x = NULL, y = "Cumulative Return",
+    caption  = "bal_fi_pf: LQD/IEF/HYG/EMB  ·  bal_eq_pf: URTH/SPY/AAXJ  ·  Full history"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(plot.title       = element_text(face = "bold", colour = "#1B2A4A"),
+        panel.grid.minor = element_blank())
+```
+
+```{r bal-stats}
+# ── Risk/return stats for both sub-portfolios + benchmarks ────────────────────
+.stats_row <- function(ret_xts, label) {
+  rv <- as.numeric(zoo::coredata(ret_xts))
+  rv <- rv[!is.na(rv)]
+  tibble(Portfolio = label,
+         Ann_Ret   = mean(rv) * 252,
+         Ann_Vol   = sd(rv)   * sqrt(252),
+         Sharpe    = (mean(rv) * 252) / (sd(rv) * sqrt(252)),
+         Max_DD    = .base_maxdd(rv))
+}
+
+bal_stats <- bind_rows(
+  .stats_row(r_fi,   "bal_fi_pf"),
+  .stats_row(r_agg,  "AGG (FI bmk)"),
+  .stats_row(r_eq,   "bal_eq_pf"),
+  .stats_row(r_urth, "URTH (EQ bmk)")
+) %>%
+  mutate(across(c(Ann_Ret, Ann_Vol, Sharpe, Max_DD), ~ round(., 3)))
+
+bal_stats %>%
+  mutate(
+    Ann_Ret = scales::percent(Ann_Ret, accuracy = 0.1),
+    Ann_Vol = scales::percent(Ann_Vol, accuracy = 0.1),
+    Max_DD  = scales::percent(-Max_DD, accuracy = 0.1)
+  ) %>%
+  kable(col.names = c("Portfolio", "Ann. Return", "Ann. Vol", "Sharpe", "Max DD"),
+        align = "lrrrr",
+        caption = "BAL sub-portfolio risk/return vs benchmarks · full available history") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  row_spec(c(1, 3), bold = TRUE) %>%
+  row_spec(c(2, 4), color = "grey")
+```
+
+---
+
+# 9 · Pair Factsheet — `r params$fs_ticker` vs `r params$fs_bmk`
+
+<span class="section-label lbl-navy">Factsheet</span>
+
+Full 7-panel pair analysis: cumulative wealth, L/S spread, drawdown, return
+distribution, 250-day rolling correlation, regime-conditional correlation, and
+250-day rolling IR — all regime-shaded against the SPY Fall/Recovery/Consolidation
+cycle.
+
+Re-render for any ticker by passing `params`:
+```r
+rmarkdown::render(
+  here("Rmd/saa_execution_report.Rmd"),
+  params     = list(fs_ticker = "GLD", fs_bmk = "SPY"),
+  output_file = "saa_execution_report_GLD.html",
+  output_dir  = here("03_reports")
+)
+```
+
+```{r factsheet-load, include=FALSE}
+source(here("utility/factsheet_functions.R"))
+```
+
+```{r factsheet-plot, fig.width=13, fig.height=30, out.width="100%"}
+fs_out <- fs_render(
+  ticker  = params$fs_ticker,
+  bmk     = params$fs_bmk,
+  ret_xts = xts_d_abs,
+  rt      = build_regime_table(xts_d_abs[, params$fs_bmk])
+)
+```
+
+```{r factsheet-stats}
+fs_out$stats %>%
+  kable(caption = paste0(params$fs_ticker, " vs ", params$fs_bmk,
+                         " — summary statistics · common date window"),
+        align = "lrrrrr") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE) %>%
+  row_spec(1, bold = TRUE, color = "#1D3557") %>%
+  row_spec(3, bold = TRUE, color = "#E63946")
+```
+
+---
+
+*Report generated by `Rmd/saa_execution_report.Rmd` ·
+`scripts_saa_execution/` pipeline · `r Sys.Date()`*

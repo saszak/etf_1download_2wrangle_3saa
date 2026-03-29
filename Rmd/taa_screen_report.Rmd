@@ -1,0 +1,300 @@
+---
+title: "TAA Momentum Screen"
+subtitle: "Short-Term Relative Outperformance vs SPY · 6M / 12M / 2Y Horizons"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(tidyverse)
+library(xts)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(here)
+
+select <- dplyr::select
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+source(here("scripts/00_init_universe.R"))
+source(here("scripts_saa_taa/taa_momentum_screen.R"))
+
+# ── Build screen ──────────────────────────────────────────────────────────────
+scr <- build_taa_screen(xts_ret, etf_metadata)
+
+# ── Quadrant colour map (for tables) ─────────────────────────────────────────
+QUAD_BG <- c(
+  "TAA Only"   = "#FFF3E0",
+  "SAA + TAA"  = "#E8F5E9",
+  "SAA (cold)" = "#E3F2FD",
+  "Avoid"      = "#FFEBEE"
+)
+QUAD_FG <- c(
+  "TAA Only"   = "#E65100",
+  "SAA + TAA"  = "#2E7D32",
+  "SAA (cold)" = "#1565C0",
+  "Avoid"      = "#C62828"
+)
+```
+
+---
+
+## Section 1 — Executive Summary
+
+```{r exec-counts}
+# ── Quadrant counts ─────────────────────────────────────────────────────────
+counts_df <- scr %>%
+  count(quadrant) %>%
+  mutate(
+    quadrant = factor(quadrant,
+                      levels = c("SAA + TAA", "TAA Only",
+                                 "SAA (cold)", "Avoid")),
+    Description = case_when(
+      quadrant == "SAA + TAA"  ~ "Structurally superior AND currently outperforming. Dual SAA/TAA case.",
+      quadrant == "TAA Only"   ~ "Recently hot but no durable edge over SPY. Pure momentum/tactical play.",
+      quadrant == "SAA (cold)" ~ "Full-period quality exceeds threshold but lagging short-term. Wait for entry.",
+      quadrant == "Avoid"      ~ "Neither durable nor currently hot. No TAA or SAA case."
+    )
+  ) %>%
+  arrange(quadrant) %>%
+  rename(Quadrant = quadrant, `# Tickers` = n)
+
+kable(counts_df, align = c("l", "r", "l"),
+      caption = paste0("TAA Screen Summary — ", nrow(scr),
+                       " tickers · Data as of ", format(Sys.Date()))) %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "center", font_size = 13) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  row_spec(which(counts_df$Quadrant == "SAA + TAA"),
+           background = QUAD_BG["SAA + TAA"], color = QUAD_FG["SAA + TAA"],
+           bold = TRUE) %>%
+  row_spec(which(counts_df$Quadrant == "TAA Only"),
+           background = QUAD_BG["TAA Only"]) %>%
+  row_spec(which(counts_df$Quadrant == "SAA (cold)"),
+           background = QUAD_BG["SAA (cold)"]) %>%
+  row_spec(which(counts_df$Quadrant == "Avoid"),
+           background = QUAD_BG["Avoid"]) %>%
+  column_spec(1, bold = TRUE) %>%
+  column_spec(2, bold = TRUE)
+```
+
+```{r exec-saa-taa-table}
+# ── SAA + TAA candidates — detail ───────────────────────────────────────────
+saa_taa <- scr %>%
+  filter(quadrant == "SAA + TAA") %>%
+  arrange(desc(ir_full)) %>%
+  mutate(
+    rel_6m      = percent(rel_6m,      accuracy = 1),
+    rel_12m     = percent(rel_12m,     accuracy = 1),
+    rel_2y      = percent(rel_2y,      accuracy = 1),
+    ir_full     = sprintf("%+.2f", ir_full),
+    ir_1y       = sprintf("%+.2f", ir_1y),
+    consist_pct = percent(consist_pct, accuracy = 1)
+  ) %>%
+  select(Ticker = ticker, Name = name, `Asset Class` = asset_class,
+         `6M α` = rel_6m, `12M α` = rel_12m, `2Y α` = rel_2y,
+         `IR (full)` = ir_full, `IR (1Y)` = ir_1y,
+         Consistency = consist_pct)
+
+kable(saa_taa, align = c("l","l","l","r","r","r","r","r","r"),
+      caption = "SAA + TAA Candidates — Structurally Superior AND Currently Outperforming") %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "center", font_size = 13) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A") %>%
+  row_spec(seq_len(nrow(saa_taa)), background = QUAD_BG["SAA + TAA"])
+```
+
+```{r exec-saa-cold-table}
+# ── SAA (cold) — worth watching ─────────────────────────────────────────────
+saa_cold <- scr %>%
+  filter(quadrant == "SAA (cold)") %>%
+  arrange(desc(ir_full)) %>%
+  mutate(
+    rel_6m      = percent(rel_6m,      accuracy = 1),
+    rel_12m     = percent(rel_12m,     accuracy = 1),
+    rel_2y      = percent(rel_2y,      accuracy = 1),
+    ir_full     = sprintf("%+.2f", ir_full),
+    ir_1y       = sprintf("%+.2f", ir_1y),
+    consist_pct = percent(consist_pct, accuracy = 1)
+  ) %>%
+  select(Ticker = ticker, Name = name, `Asset Class` = asset_class,
+         `6M α` = rel_6m, `12M α` = rel_12m, `2Y α` = rel_2y,
+         `IR (full)` = ir_full, `IR (1Y)` = ir_1y,
+         Consistency = consist_pct)
+
+kable(saa_cold, align = c("l","l","l","r","r","r","r","r","r"),
+      caption = "SAA (Cold) — Structurally Superior but Lagging Short-Term (Potential Entry Points)") %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "center", font_size = 13) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A") %>%
+  row_spec(seq_len(nrow(saa_cold)), background = QUAD_BG["SAA (cold)"])
+```
+
+> **Classification logic:** `TAA Only` = 6M relative return > 5% AND full-period IR < 0.10 ·
+> `SAA + TAA` = both thresholds passed · `SAA (cold)` = quality IR ≥ 0.10 but 6M < 5% ·
+> `Avoid` = neither criterion met.
+> **Consistency** = % of rolling 126-day (6M) windows with positive relative return vs SPY.
+
+---
+
+## Section 2 — Quadrant Scatter
+
+*Each dot is one ETF. Colour = asset class. Size = |trailing relative return|.*
+*Dashed lines divide the four quadrants. Only TAA-relevant tickers are labelled.*
+
+```{r scatter-6m, fig.height=7}
+print(plot_taa_scatter(scr, "rel_6m"))
+```
+
+```{r scatter-12m, fig.height=7}
+print(plot_taa_scatter(scr, "rel_12m"))
+```
+
+```{r scatter-2y, fig.height=7}
+print(plot_taa_scatter(scr, "rel_2y"))
+```
+
+---
+
+## Section 3 — Ranked Bar Charts
+
+*Top 15 tickers per horizon. Colour = quadrant. Dashed line = 5% TAA threshold.*
+
+```{r ranking, fig.height=6}
+print(plot_taa_ranking(scr, n = 15L))
+```
+
+---
+
+## Section 4 — Momentum Consistency
+
+*Of the TAA Only + SAA+TAA tickers, how often have they beaten SPY on a rolling 6M basis?
+High consistency = sustained momentum. Low consistency = a single lucky spike.*
+
+```{r consistency, fig.height=7}
+p_con <- plot_taa_consistency(scr, n = 25L)
+if (!is.null(p_con)) print(p_con)
+```
+
+---
+
+## Section 5 — TAA Only Candidates: Top 20
+
+*Pure momentum plays — hot now but not structurally superior to SPY.*
+*Use these for short-term tactical tilts only; do not size as SAA anchors.*
+
+```{r taa-only-table}
+taa_only <- scr %>%
+  filter(quadrant == "TAA Only") %>%
+  slice_max(rel_6m, n = 20) %>%
+  mutate(
+    rel_6m      = percent(rel_6m,      accuracy = 1),
+    rel_12m     = percent(rel_12m,     accuracy = 1),
+    rel_2y      = percent(rel_2y,      accuracy = 1),
+    ir_full     = sprintf("%+.2f", ir_full),
+    ir_1y       = sprintf("%+.2f", ir_1y),
+    consist_pct = percent(consist_pct, accuracy = 1)
+  ) %>%
+  select(Ticker = ticker, Name = name, `Asset Class` = asset_class,
+         `6M α` = rel_6m, `12M α` = rel_12m, `2Y α` = rel_2y,
+         `IR (full)` = ir_full, `IR (1Y)` = ir_1y,
+         Consistency = consist_pct)
+
+kable(taa_only, align = c("l","l","l","r","r","r","r","r","r"),
+      caption = "Top 20 TAA Only Candidates (ranked by trailing 6M α)") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A") %>%
+  row_spec(seq_len(nrow(taa_only)), background = QUAD_BG["TAA Only"])
+```
+
+---
+
+## Section 6 — Full Universe Table
+
+*All `r nrow(scr)` tickers. Sort any column. Use browser search to filter.*
+
+```{r full-table}
+full_tbl <- scr %>%
+  arrange(quadrant, desc(rel_6m)) %>%
+  mutate(
+    rel_6m      = percent(rel_6m,      accuracy = 1),
+    rel_12m     = percent(rel_12m,     accuracy = 1),
+    rel_2y      = percent(rel_2y,      accuracy = 1),
+    ir_full     = sprintf("%+.2f", ir_full),
+    ir_1y       = sprintf("%+.2f", if_else(is.na(ir_1y), 0, ir_1y)),
+    consist_pct = percent(consist_pct, accuracy = 1)
+  ) %>%
+  select(Ticker = ticker, Name = name, `Asset Class` = asset_class,
+         Quadrant = quadrant,
+         `6M α` = rel_6m, `12M α` = rel_12m, `2Y α` = rel_2y,
+         `IR (full)` = ir_full, `IR (1Y)` = ir_1y,
+         Consistency = consist_pct)
+
+# Row colouring by quadrant
+quad_rows <- list(
+  "SAA + TAA"  = which(full_tbl$Quadrant == "SAA + TAA"),
+  "TAA Only"   = which(full_tbl$Quadrant == "TAA Only"),
+  "SAA (cold)" = which(full_tbl$Quadrant == "SAA (cold)"),
+  "Avoid"      = which(full_tbl$Quadrant == "Avoid")
+)
+
+tbl <- kable(full_tbl, align = c("l","l","l","l","r","r","r","r","r","r"),
+             caption = paste0("Full TAA Universe — ", nrow(full_tbl),
+                              " tickers · as of ", format(Sys.Date()))) %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered", "striped"),
+                font_size = 11) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A") %>%
+  column_spec(4, bold = TRUE)
+
+for (quad in names(quad_rows)) {
+  rows <- quad_rows[[quad]]
+  if (length(rows) > 0)
+    tbl <- row_spec(tbl, rows,
+                    background = QUAD_BG[quad],
+                    color      = ifelse(quad %in% c("SAA + TAA", "TAA Only"),
+                                        QUAD_FG[quad], "black"))
+}
+
+tbl
+```
+
+---
+
+```{r footer}
+cat(sprintf(
+  "_Generated %s · Benchmark: SPY · IR threshold: %.2f · 6M α threshold: %.0f%% · Universe: %d tickers_",
+  format(Sys.Date(), "%Y-%m-%d"),
+  IR_SAA_THRESHOLD, REL_THRESHOLD * 100, nrow(scr)
+))
+```

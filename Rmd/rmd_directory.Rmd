@@ -1,0 +1,160 @@
+---
+title: "Report Directory — ETF_1DOWNLOAD_2WRANGLE_3SAA"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(knitr)
+```
+
+---
+
+## 1. Overview
+
+This file is the single entry point for all R Markdown reports in the project.
+Each section below describes one report: its purpose, output format, data dependencies,
+and the exact `rmarkdown::render()` call needed to reproduce it.
+
+| # | Report | Format | Layer |
+|---|--------|--------|-------|
+| 1 | SPY Regime & State Machine | HTML + PDF | Signal |
+| 2 | Long/Short Overlay Portfolio | PDF | SAA/TAA |
+| 3 | ETF Performance Report | HTML | Performance |
+| 4 | Sovereign ETF Intelligence | Flexdashboard | Universe |
+| 5 | Sentinel ETF Intelligence | Flexdashboard | Signal |
+
+---
+
+## 2. Active Reports
+
+### 2.1 SPY Regime & State Machine
+
+**File:** `spy_regime_statemachine_report.Rmd` (project root)
+
+Documents the SPY drawdown cycle engine — a 3-state classification (Fall / Recovery /
+Consolidation) driven entirely by `xts_ret[,"SPY"]`. Covers the hysteresis state machine
+methodology, regime transition diagrams, and multi-ticker alpha overlays.
+
+| Item | Detail |
+|---|---|
+| Output | HTML (primary) + PDF via xelatex |
+| Data | `02_data_processed/xts_ret_returns.rds` |
+| Sources | `scripts_spy_dd_regime/` (4 scripts) |
+| Key functions | `plot_regime_overlay()`, `plot_regime_stats()`, `build_regime_table()` |
+
+```r
+rmarkdown::render("spy_regime_statemachine_report.Rmd")
+```
+
+---
+
+### 2.2 Long/Short Overlay Portfolio
+
+**File:** `long_short_overlay_report.Rmd` (project root)
+
+Methodology and back-test results for the long/short overlay strategy built on top of
+the regime engine. Phase 1 covers signal construction; Phase 2 covers portfolio
+integration and performance attribution.
+
+| Item | Detail |
+|---|---|
+| Output | PDF (xelatex) |
+| Data | `02_data_processed/xts_ret_returns.rds`, signal registry |
+| Sources | `scripts_saa_structured/long_short_overlay.R` |
+
+```r
+rmarkdown::render("long_short_overlay_report.Rmd")
+```
+
+---
+
+### 2.3 ETF Performance Report
+
+**File:** `03_reports/etf_performance_report.Rmd`
+
+Static snapshot of YTD / MTD returns and 52-week range positions across the full
+sovereign universe. Includes a `ggplot` range chart faceted by asset class (color =
+trend regime, label = YTD) and a searchable `reactable` performance table.
+
+| Item | Detail |
+|---|---|
+| Output | HTML (self-contained) |
+| Data | `raw_data.rds`, `technical_summary.rds`, `outlier_regime_report.rds` |
+| Sources | `project_tree.R`, `scripts/00_init_universe.R` |
+| Replaces | Shiny app `scripts/dashboard_etf_performance.R` for static use |
+
+```r
+rmarkdown::render("03_reports/etf_performance_report.Rmd")
+```
+
+---
+
+### 2.4 Sovereign ETF Intelligence
+
+**File:** `03_reports/sovereign_intelligence.Rmd`
+
+Flexdashboard covering the full sovereign ETF universe — allocation overview,
+asset class breakdown, and portfolio construction context.
+
+| Item | Detail |
+|---|---|
+| Output | Flexdashboard HTML |
+| Data | Processed data from `02_data_processed/` |
+
+```r
+rmarkdown::render("03_reports/sovereign_intelligence.Rmd")
+```
+
+---
+
+### 2.5 Sentinel ETF Intelligence
+
+**File:** `03_reports/sentinel_intelligence.Rmd`
+
+Flexdashboard focused on the signal/sentinel layer — regime flags, momentum status,
+and outlier alerts across the universe.
+
+| Item | Detail |
+|---|---|
+| Output | Flexdashboard HTML |
+| Data | `technical_summary.rds`, `outlier_regime_report.rds` |
+
+```r
+rmarkdown::render("03_reports/sentinel_intelligence.Rmd")
+```
+
+---
+
+## 3. Render All
+
+Render every active report in one call:
+
+```r
+reports <- c(
+  "spy_regime_statemachine_report.Rmd",
+  "long_short_overlay_report.Rmd",
+  "03_reports/etf_performance_report.Rmd",
+  "03_reports/sovereign_intelligence.Rmd",
+  "03_reports/sentinel_intelligence.Rmd"
+)
+
+purrr::walk(reports, rmarkdown::render)
+```
+
+---
+
+## 4. Archive
+
+| File | Note |
+|---|---|
+| `old/03_reporting_engine/etf123_dashboard.Rmd` | Legacy dashboard — superseded by 2.3 |
+| `template.Rmd` | Blank starter for new reports |

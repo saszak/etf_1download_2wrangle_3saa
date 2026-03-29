@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Rscript -e \"\nlibrary\\(here\\)\nsource\\(here\\('project_tree.R'\\)\\)\nsource\\(here\\(project_tree\\\\$scripts\\\\$init\\)\\)\nsource\\(here\\('scripts/utility/util_functions.R'\\)\\)\nxts_rel <- readRDS\\(here\\('02_data_processed/xts_rel.rds'\\)\\)\nsource\\(here\\('scripts_saa_structured/long_short_overlay.R'\\)\\)\n\ncat\\('\\\\n=== RETURN SUMMARY ===\\\\n'\\)\nprint\\(summary\\(as.numeric\\(ls_result\\\\$returns\\)\\)\\)\n\ncat\\('\\\\n=== HEAD \\(first 5 rows\\) ===\\\\n'\\)\nprint\\(head\\(ls_result\\\\$returns, 5\\)\\)\n\ncat\\('\\\\n=== TAIL \\(last 5 rows\\) ===\\\\n'\\)\nprint\\(tail\\(ls_result\\\\$returns, 5\\)\\)\n\ncat\\('\\\\n=== Non-zero count ===\\\\n'\\)\ncat\\('Total rows:', nrow\\(ls_result\\\\$returns\\), '\\\\n'\\)\ncat\\('Non-zero rows:', sum\\(as.numeric\\(ls_result\\\\$returns\\) != 0, na.rm=TRUE\\), '\\\\n'\\)\ncat\\('NA rows:', sum\\(is.na\\(as.numeric\\(ls_result\\\\$returns\\)\\)\\), '\\\\n'\\)\n\ncat\\('\\\\n=== Annualized Stats ===\\\\n'\\)\nprint\\(table.AnnualizedReturns\\(ls_result\\\\$returns, scale=252, geometric=FALSE\\)\\)\n\ncat\\('\\\\n=== Weight sums at rebalance dates ===\\\\n'\\)\nw_sums <- rowSums\\(ls_result\\\\$weights_rebal\\)\nprint\\(summary\\(w_sums\\)\\)\n\" 2>&1)",
+      "Bash(Rscript -e \"\noptions\\(warn = 1\\)\nlibrary\\(here\\)\nsource\\(here\\('project_tree.R'\\)\\)\nsource\\(here\\(project_tree\\\\$scripts\\\\$init\\)\\)\nsource\\(here\\('scripts/utility/util_functions.R'\\)\\)\nxts_rel <- readRDS\\(here\\('02_data_processed/xts_rel.rds'\\)\\)\nsource\\(here\\('scripts_saa_structured/long_short_overlay.R'\\)\\)\n\" 2>/dev/null)"
+    ]
+  }
+}

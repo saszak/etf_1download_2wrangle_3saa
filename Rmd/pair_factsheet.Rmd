@@ -1,0 +1,339 @@
+---
+title: "`r paste0('L/S Pair Factsheet — Long ', params$ticker, ' / Short ', params$bmk)`"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: false
+    theme: flatly
+    highlight: tango
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+params:
+  ticker:   "XLK"
+  bmk:      "SPY"
+  t_fall:   0.10
+  t_cruise: 0.05
+  rho_min:  0.75
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(tidyverse)
+library(xts)
+library(PerformanceAnalytics)
+library(knitr)
+library(kableExtra)
+library(here)
+
+select <- dplyr::select   # PA masks dplyr::select
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+if (!exists("xts_ret"))
+  xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+if (!exists("build_regime_table"))
+  source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+
+if (!exists("ticker_long_short"))
+  source(here("scripts_saa_taa/taa_regime_engine.R"))
+
+source(here("utility/factsheet_functions.R"))
+
+# ── Regime table ──────────────────────────────────────────────────────────────
+rt <- suppressWarnings(
+  build_regime_table(xts_ret[, params$bmk], params$t_fall, params$t_cruise)
+)
+
+# ── Core analysis ─────────────────────────────────────────────────────────────
+result <- ticker_long_short(
+  ticker   = params$ticker,
+  bmk      = params$bmk,
+  xts_ret  = xts_ret,
+  rt       = rt,
+  t_fall   = params$t_fall,
+  t_cruise = params$t_cruise,
+  rho_min  = params$rho_min
+)
+
+s <- result$summary
+r <- result$regime_tbl
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
+REGIME_PAL <- c(Fall = "#D62728", Recovery = "#2CA02C", Consolidation = "#1F77B4")
+
+conf_col <- function(x) dplyr::case_when(
+  x == "High"   ~ "#1a7a3c",
+  x == "Medium" ~ "#2171b5",
+  x == "Low"    ~ "#fd8d3c",
+  TRUE          ~ "#999999"
+)
+
+type_col <- function(x) dplyr::case_when(
+  x == "ALPHA"  ~ "#1a7a3c",
+  x == "HEDGE"  ~ "#2171b5",
+  x == "STABLE" ~ "#6baed6",
+  x == "LAG"    ~ "#fd8d3c",
+  x == "LOSS"   ~ "#cb181d",
+  TRUE          ~ "#999999"
+)
+```
+
+---
+
+## Section 1 — Pair Summary {.section}
+
+```{r summary-header}
+archetype_desc <- dplyr::case_when(
+  s$archetype == "Cycle Amplifier"   ~ "Amplifies both SPY drawdowns and recoveries. Pure beta play.",
+  s$archetype == "Recovery Sprinter" ~ "Underperforms in Fall, surges in Recovery, lags in Consolidation.",
+  s$archetype == "Defensive Burden"  ~ "Cushions Fall but drags in Recovery — net opportunity cost.",
+  s$archetype == "All-Regime Drag"   ~ "Underperforms in every regime. No TAA case.",
+  s$archetype == "Corr-Fail"         ~ paste0("Correlation too low (ρ=", round(s$rho,3), " < ", params$rho_min, "). L/S pair structurally invalid."),
+  TRUE                               ~ "No dominant cross-regime pattern detected."
+)
+```
+
+```{r summary-table}
+summary_df <- tibble(
+  Metric = c(
+    "Benchmark", "Archetype",
+    "Correlation (full)", "Correlation (1y)",
+    paste0(s$ticker, " Ann Return"), paste0(s$ticker, " Ann Vol"), paste0(s$ticker, " MaxDD"),
+    "Spread Ann Return",  "Spread Ann Vol",  "Spread MaxDD",  "Information Ratio"
+  ),
+  Value = c(
+    params$bmk, s$archetype,
+    sprintf("%.3f", s$rho),   sprintf("%.3f", s$rho_1y),
+    sprintf("%+.1f%%", s$ann_ret_ticker * 100),
+    sprintf("%.1f%%",  s$ann_vol_ticker * 100),
+    sprintf("%.1f%%",  s$max_dd_ticker  * 100),
+    sprintf("%+.1f%%", s$ann_ret_spread * 100),
+    sprintf("%.1f%%",  s$ann_vol_spread * 100),
+    sprintf("%.1f%%",  s$max_dd_spread  * 100),
+    sprintf("%+.2f",   s$ir)
+  )
+)
+
+kable(summary_df, align = c("l","r"), col.names = c("", ""),
+      caption = paste0(s$ticker, " vs ", s$bmk, " — Full history")) %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "center", font_size = 13) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  row_spec(2, bold = TRUE, background = "#F0F4FA") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A") %>%
+  column_spec(2, color = "#2C2C2C") %>%
+  footnote(general = archetype_desc, general_title = "Archetype: ", footnote_as_chunk = TRUE)
+```
+
+---
+
+## Section 2 — Regime Confidence Table {.section}
+
+```{r regime-table}
+r_display <- r %>%
+  mutate(
+    avg_alpha   = sprintf("%+.1f%%", avg_alpha   * 100),
+    sd_alpha    = sprintf("%.1f%%",  sd_alpha    * 100),
+    t_stat      = sprintf("%.2f",    t_stat),
+    pct_correct = sprintf("%.0f%%",  pct_correct * 100),
+    conf_score  = sprintf("%.2f",    conf_score)
+  ) %>%
+  select(Regime = regime, Type = modal_type, `Avg α` = avg_alpha,
+         `SD α` = sd_alpha, `t-stat` = t_stat,
+         `n episodes` = n_episodes, Consistency = pct_correct,
+         Score = conf_score, Confidence = confidence)
+
+conf_colours <- conf_col(r$confidence)
+type_colours <- type_col(r$modal_type)
+
+kable(r_display, align = c("l","c","r","r","r","r","r","r","c"),
+      caption = "Per-regime alpha decomposition + confidence") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 13) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A") %>%
+  column_spec(2, color = "white", background = type_colours) %>%
+  column_spec(9, bold = TRUE, color = "white", background = conf_colours) %>%
+  row_spec(which(r$regime == "Fall"),          background = "#FDF2F2") %>%
+  row_spec(which(r$regime == "Recovery"),      background = "#F2FAF2") %>%
+  row_spec(which(r$regime == "Consolidation"), background = "#F2F5FD")
+```
+
+> **Score formula:** `0.50 × min(|t|/2, 1) + 0.30 × consistency + 0.20 × min(n/6, 1)`
+> **Tiers:** High ≥ 0.75 · Medium ≥ 0.50 · Low ≥ 0.30 · Weak < 0.30
+
+---
+
+## Section 3 — Performance Statistics {.section}
+
+```{r pair-stats, results='hide', include=FALSE}
+# Run fs_render once, capture return value — suppress raw cat/print output
+fs_out <- fs_render(params$ticker, bmk = params$bmk, ret_xts = xts_ret, rt = rt)
+
+# ── Rebuild internals needed for regime tables ─────────────────────────────
+tk_r   <- as.numeric(xts_ret[, params$ticker])
+bmk_r  <- as.numeric(xts_ret[, params$bmk])
+common <- which(!is.na(tk_r) & !is.na(bmk_r))
+tk_r   <- tk_r[common]
+bmk_r  <- bmk_r[common]
+dates  <- as.Date(index(xts_ret))[common]
+spr_r  <- tk_r - bmk_r
+
+# Rolling 250-day correlation
+roll_cor <- as.numeric(zoo::rollapply(
+  cbind(tk_r, bmk_r), width = 250,
+  FUN = function(m) cor(m[,1], m[,2], use = "complete.obs"),
+  by.column = FALSE, align = "right", fill = NA
+))
+
+# Rolling 250-day IR
+mu_r   <- as.numeric(zoo::rollapply(spr_r, 250, mean,  align="right", fill=NA))
+sd_r   <- as.numeric(zoo::rollapply(spr_r, 250, sd,    align="right", fill=NA))
+roll_ir <- (mu_r / sd_r) * sqrt(252)
+
+# Regime daily labels
+regime_daily <- rt %>%
+  rowwise() %>%
+  mutate(date = list(seq(as.Date(xmin), as.Date(xmax), by = "day"))) %>%
+  tidyr::unnest(date) %>%
+  dplyr::select(date, regime) %>%
+  ungroup() %>%
+  mutate(regime = factor(regime, levels = c("Fall", "Recovery", "Consolidation")))
+
+daily_df <- tibble(date = dates, roll_cor = roll_cor, roll_ir = roll_ir) %>%
+  left_join(regime_daily, by = "date")
+
+# Regime-conditional correlation
+regime_cor_tbl <- daily_df %>%
+  filter(!is.na(roll_cor), !is.na(regime)) %>%
+  group_by(regime) %>%
+  summarise(`Mean ρ` = round(mean(roll_cor), 3), .groups = "drop")
+
+# IR by regime
+regime_ir_tbl <- daily_df %>%
+  filter(!is.na(roll_ir), !is.na(regime)) %>%
+  group_by(regime) %>%
+  summarise(
+    `Mean IR`     = round(mean(roll_ir), 2),
+    `% Positive`  = paste0(round(mean(roll_ir > 0) * 100, 1), "%"),
+    .groups = "drop"
+  )
+
+full_ir  <- fs_out$full_ir
+full_cor <- fs_out$full_cor
+```
+
+```{r stats-table-summary}
+# ── 3a: Summary statistics ─────────────────────────────────────────────────
+stats_df <- fs_out$stats %>%
+  rename(Series = Series)
+
+kable(stats_df,
+      align   = c("l","r","r","r","r","r"),
+      caption = paste0("Summary Statistics — ", params$ticker,
+                       " vs ", params$bmk,
+                       "  |  Common period: ",
+                       format(min(dates)), " → ", format(max(dates)),
+                       "  (", length(dates), " trading days)")) %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "center", font_size = 13) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  row_spec(1, background = "#F0F4FA") %>%
+  row_spec(3, bold = TRUE) %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A")
+```
+
+```{r stats-table-regime, fig.show='asis'}
+# ── 3b: Regime-conditional correlation ────────────────────────────────────
+kable(regime_cor_tbl,
+      align   = c("l","r"),
+      caption = sprintf("Regime-Conditional Rolling Correlation (250-day window)  |  Full-period ρ = %.3f",
+                        full_cor)) %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "center", font_size = 13) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  row_spec(which(regime_cor_tbl$regime == "Fall"),          background = "#FDF2F2") %>%
+  row_spec(which(regime_cor_tbl$regime == "Recovery"),      background = "#F2FAF2") %>%
+  row_spec(which(regime_cor_tbl$regime == "Consolidation"), background = "#F2F5FD") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A")
+```
+
+```{r dist-troika, fig.height=5}
+# ── 3b.5: Three-view return distribution ──────────────────────────────────
+print(fs_out$p_dist_troika)
+```
+
+```{r stats-table-ir}
+# ── 3c: Rolling IR by regime ───────────────────────────────────────────────
+kable(regime_ir_tbl,
+      align   = c("l","r","r"),
+      caption = sprintf("Rolling IR by SPY Regime (250-day window)  |  Full-period IR = %.2f",
+                        full_ir)) %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "center", font_size = 13) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  row_spec(which(regime_ir_tbl$regime == "Fall"),          background = "#FDF2F2") %>%
+  row_spec(which(regime_ir_tbl$regime == "Recovery"),      background = "#F2FAF2") %>%
+  row_spec(which(regime_ir_tbl$regime == "Consolidation"), background = "#F2F5FD") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A")
+```
+
+---
+
+## Section 4 — 7-Panel Factsheet {.section}
+
+*Cumulative wealth · L/S spread · Drawdown · Return distribution · Rolling ρ · Regime ρ · Rolling IR*
+
+```{r factsheet, fig.height=14, results='hide'}
+print(fs_out$combined)
+```
+
+```{r factsheet-troika, fig.height=5}
+print(fs_out$p_dist_troika)
+```
+
+---
+
+## Section 5 — Regime Overlay & Alpha Summary {.section}
+
+*Cumulative return through regime episodes (left) · Average alpha per regime (right)*
+
+```{r overlay-summary, fig.height=6}
+plot(result, xts_ret = xts_ret, which = c("overlay", "summary"))
+```
+
+---
+
+## Section 6 — Per-Episode Heatmap {.section}
+
+*Each cell = one Fall/Recovery/Consolidation episode; coloured by outperformance type*
+
+```{r heatmap, fig.height=5}
+plot(result, xts_ret = xts_ret, which = "heatmap")
+```
+
+---
+
+```{r footer}
+cat(sprintf(
+  "_Generated %s · %s vs %s · T_fall=%.0f%% · ρ_min=%.2f_",
+  format(Sys.Date(), "%Y-%m-%d"),
+  params$ticker, params$bmk,
+  params$t_fall * 100, params$rho_min
+))
+```

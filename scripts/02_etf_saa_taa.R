@@ -58,8 +58,11 @@ calculate_inv_vol_weights <- function(cluster_returns, window = 60) {
 
 # --- 4. EXECUTION PIPELINE ---
 
-# Step A: Aggregate 61 Tickers -> 6 Strategy Clusters
-xts_clusters <- calculate_cluster_returns(xts_ret, cat_tickers)
+# Step A: Aggregate investable tickers -> Strategy Clusters
+# Exclude "Signal" pf_function — those tickers are macro indicators only,
+# not held as positions (FX ETFs, VIXY, AOR, AOK).
+investable_tickers <- cat_tickers[names(cat_tickers) != "Signal"]
+xts_clusters <- calculate_cluster_returns(xts_ret, investable_tickers)
 
 # Step B: Calculate Final Allocation Weights
 final_weights <- calculate_inv_vol_weights(xts_clusters)

@@ -1,0 +1,287 @@
+---
+title: "SAA Universe — Shiny App Executive Summary"
+subtitle: "Core hierarchical universe at each detail level (Depth 0 → 3)"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    toc_depth: 2
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+---
+
+<style>
+.depth-box {
+  background-color: #f0f4f8;
+  border-left: 4px solid #2c3e50;
+  padding: 10px 16px;
+  margin: 12px 0 20px 0;
+  border-radius: 0 4px 4px 0;
+  font-size: 13px;
+}
+.bucket-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 700;
+  margin-right: 4px;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(plotly)
+library(reactable)
+library(scales)
+library(here)
+library(lubridate)
+
+# ── Data pipeline (mirrors shiny_dashboard/global.R) ─────────────────────────
+source(here("project_tree.R"))
+source(here(project_tree$scripts$init))        # etf_metadata
+source(here("shiny_dashboard/saa_config.R"))   # SAA_CONFIG
+
+raw_data     <- readRDS(here(project_tree$products$raw_p_d))
+tech_summary <- readRDS(here(project_tree$products$tech_summary))
+
+today     <- Sys.Date()
+ytd_start <- as.Date(paste0(year(today), "-01-01"))
+mtd_start <- floor_date(today, "month")
+
+perf_data <- raw_data %>%
+  group_by(symbol) %>%
+  arrange(date) %>%
+  mutate(adjusted = as.numeric(adjusted)) %>%
+  summarise(
+    ret_ytd = (last(adjusted) / first(adjusted[date >= ytd_start])) - 1,
+    ret_mtd = (last(adjusted) / first(adjusted[date >= mtd_start])) - 1,
+    ret_1m  = (last(adjusted) / nth(adjusted, -22L)) - 1,
+    ret_5d  = (last(adjusted) / nth(adjusted, -6L))  - 1,
+    .groups = "drop"
+  ) %>%
+  left_join(etf_metadata %>% select(ticker, name, asset_class),
+            by = c("symbol" = "ticker")) %>%
+  left_join(tech_summary %>% select(ticker, trend_regime),
+            by = c("symbol" = "ticker")) %>%
+  left_join(SAA_CONFIG, by = c("symbol" = "ticker")) %>%
+  filter(!is.na(ret_ytd), !is.na(saa_depth))
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
+BUCKET_COLS <- c(Cash = "#3b82f6", FI = "#8b5cf6", EQ = "#10b981", Alt = "#f59e0b")
+
+finviz_scale <- list(
+  c(0.00, "#7f0000"), c(0.30, "#cc2222"), c(0.46, "#f4aaaa"),
+  c(0.50, "#555555"),
+  c(0.54, "#a3f0bc"), c(0.70, "#1a7a2e"), c(1.00, "#00AA44")
+)
+
+ret_col <- function(x) {
+  case_when(x >= 0.05 ~ "#16a34a", x >= 0 ~ "#86efac",
+            x >= -0.05 ~ "#fca5a5", TRUE ~ "#dc2626")
+}
+
+# ── Treemap builder ───────────────────────────────────────────────────────────
+build_treemap <- function(df, depth_label) {
+  dot <- function(x) case_when(x > .01 ~ "\U1F7E2", x < -.01 ~ "\U1F534", TRUE ~ "\u26AA")
+
+  sectors <- df %>%
+    group_by(grp = saa_bucket) %>%
+    summarise(n = n(),
+              color     = median(ret_ytd * 100, na.rm = TRUE),
+              ret1m_med = median(ret_1m  * 100, na.rm = TRUE),
+              .groups = "drop") %>%
+    mutate(ids = grp, labels = grp, parents = "", values = n,
+           tile_text = sprintf("<b>%s</b><br>YTD med: %+.1f%%<br>%s 1M: %+.1f%%",
+                               grp, color, dot(ret1m_med / 100), ret1m_med),
+           hover = tile_text)
+
+  tickers <- df %>%
+    mutate(ids = symbol, labels = symbol, parents = saa_bucket, values = 1,
+           color = ret_ytd * 100,
+           tile_text = sprintf("<b>%s</b><br>%+.1f%%", symbol, ret_ytd * 100),
+           hover = sprintf("<b>%s</b><br>%s<br>YTD: %+.1f%%<br>MTD: %+.1f%%<br>1M: %+.1f%%",
+                           symbol, coalesce(name, ""),
+                           ret_ytd * 100, ret_mtd * 100, ret_1m * 100)) %>%
+    select(ids, labels, parents, values, color, tile_text, hover)
+
+  nodes <- bind_rows(
+    sectors %>% select(ids, labels, parents, values, color, tile_text, hover),
+    tickers
+  )
+
+  plot_ly() %>%
+    add_trace(
+      type          = "treemap",
+      ids           = nodes$ids,
+      labels        = nodes$labels,
+      parents       = nodes$parents,
+      values        = nodes$values,
+      text          = nodes$tile_text,
+      customdata    = nodes$hover,
+      hovertemplate = "%{customdata}<extra></extra>",
+      texttemplate  = "%{text}",
+      textposition  = "top left",
+      textfont      = list(color = "#ffffff", size = 12, family = "Inter"),
+      marker        = list(
+        colors     = nodes$color,
+        colorscale = finviz_scale,
+        cmid       = 0,
+        showscale  = TRUE,
+        colorbar   = list(title = list(text = "YTD %", font = list(size = 11)),
+                          tickformat = "+.1f", ticksuffix = "%",
+                          len = 0.6, thickness = 12),
+        line       = list(width = 1.5, color = "#ffffff")
+      ),
+      sort   = FALSE,
+      tiling = list(packing = "squarify"),
+      pathbar = list(visible = TRUE, thickness = 20,
+                     textfont = list(size = 11))
+    ) %>%
+    layout(
+      margin = list(t = 10, b = 10, l = 10, r = 10),
+      font   = list(family = "Inter")
+    ) %>%
+    config(displayModeBar = FALSE)
+}
+
+# ── Performance table builder ────────────────────────────────────────────────
+build_table <- function(df) {
+  df %>%
+    arrange(saa_depth, saa_bucket, symbol) %>%
+    select(symbol, name, saa_bucket, saa_depth,
+           ret_ytd, ret_mtd, ret_1m, ret_5d, trend_regime) %>%
+    reactable(
+      compact      = TRUE,
+      striped      = TRUE,
+      highlight    = TRUE,
+      defaultPageSize = 50,
+      columns = list(
+        symbol      = colDef(name = "Ticker",  width = 70,
+                             style = list(fontWeight = "700")),
+        name        = colDef(name = "Name",    minWidth = 160,
+                             style = list(fontSize = "12px", color = "#555")),
+        saa_bucket  = colDef(name = "Bucket",  width = 65,
+                             cell = function(v) {
+                               col <- BUCKET_COLS[[v]] %||% "#888"
+                               htmltools::tags$span(
+                                 style = paste0("background:", col,
+                                                "; color:#fff; padding:1px 7px;",
+                                                " border-radius:9px; font-size:11px;"),
+                                 v)
+                             }),
+        saa_depth   = colDef(name = "Depth",  width = 55,
+                             align = "center",
+                             style = list(color = "#888", fontSize = "12px")),
+        ret_ytd     = colDef(name = "YTD",    width = 70,  align = "right",
+                             format = colFormat(percent = TRUE, digits = 1),
+                             style  = function(v) list(
+                               color      = ret_col(v),
+                               fontWeight = "700", fontSize = "13px")),
+        ret_mtd     = colDef(name = "MTD",    width = 70,  align = "right",
+                             format = colFormat(percent = TRUE, digits = 1),
+                             style  = function(v) list(color = ret_col(v))),
+        ret_1m      = colDef(name = "1M",     width = 70,  align = "right",
+                             format = colFormat(percent = TRUE, digits = 1),
+                             style  = function(v) list(color = ret_col(v))),
+        ret_5d      = colDef(name = "5D",     width = 60,  align = "right",
+                             format = colFormat(percent = TRUE, digits = 1),
+                             style  = function(v) list(color = ret_col(v))),
+        trend_regime = colDef(name = "Trend", width = 75,
+                              cell = function(v) {
+                                if (is.na(v)) return("—")
+                                col <- if (v == "Bullish") "#16a34a" else "#dc2626"
+                                htmltools::tags$span(
+                                  style = paste0("color:", col, "; font-weight:700;"),
+                                  v)
+                              })
+      )
+    )
+}
+```
+
+---
+
+## Depth 0 — Minimal Essential
+
+<div class="depth-box">
+**4 anchors — app launch default.**
+One representative per bucket: the minimum coherent SAA snapshot.
+<br><br>
+<span class="bucket-pill" style="background:#3b82f6;color:#fff;">Cash</span> SGOV &nbsp;
+<span class="bucket-pill" style="background:#8b5cf6;color:#fff;">FI</span> AGG &nbsp;
+<span class="bucket-pill" style="background:#10b981;color:#fff;">EQ</span> URTH &nbsp;
+<span class="bucket-pill" style="background:#f59e0b;color:#fff;">Alt</span> GLD
+</div>
+
+```{r treemap_d0, fig.height=4}
+d0 <- perf_data %>% filter(saa_depth <= 0L)
+htmltools::tagList(build_treemap(d0, "Depth 0"))
+```
+
+```{r table_d0}
+build_table(d0)
+```
+
+---
+
+## Depth 1 — First Expansion
+
+<div class="depth-box">
+**`r nrow(perf_data %>% filter(saa_depth <= 1L))` tickers.**
+Full yield curve (Cash/FI), broad equity (US + DM + EM Europe).
+</div>
+
+```{r treemap_d1, fig.height=5}
+d1 <- perf_data %>% filter(saa_depth <= 1L)
+htmltools::tagList(build_treemap(d1, "Depth 1"))
+```
+
+```{r table_d1}
+build_table(d1)
+```
+
+---
+
+## Depth 2 — + US Sectors
+
+<div class="depth-box">
+**`r nrow(perf_data %>% filter(saa_depth <= 2L))` tickers.**
+Full GICS-11 sector breakdown added inside EQ bucket.
+</div>
+
+```{r treemap_d2, fig.height=5}
+d2 <- perf_data %>% filter(saa_depth <= 2L)
+htmltools::tagList(build_treemap(d2, "Depth 2"))
+```
+
+```{r table_d2}
+build_table(d2)
+```
+
+---
+
+## Depth 3 — + Country Detail
+
+<div class="depth-box">
+**`r nrow(perf_data %>% filter(saa_depth <= 3L))` tickers.**
+DM + EM country-level single-country ETFs. Full SAA tree.
+</div>
+
+```{r treemap_d3, fig.height=6}
+d3 <- perf_data %>% filter(saa_depth <= 3L)
+htmltools::tagList(build_treemap(d3, "Depth 3"))
+```
+
+```{r table_d3}
+build_table(d3)
+```
+
+---
+
+*Generated `r format(Sys.Date(), "%B %d, %Y")` · Data: Yahoo Finance via raw_data.rds*

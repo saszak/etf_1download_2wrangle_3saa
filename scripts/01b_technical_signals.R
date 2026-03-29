@@ -38,15 +38,27 @@ if (is.list(raw_data) && !is.data.frame(raw_data)) {
   processing_df <- raw_data
 }
 
+# SMA wrapper: tolerates leading NAs (e.g. tickers that started mid-series)
+safe_sma <- function(x, n) {
+  out <- rep(NA_real_, length(x))
+  first_valid <- which(!is.na(x))[1]
+  if (is.na(first_valid)) return(out)
+  valid_sma <- tryCatch(as.numeric(SMA(x[first_valid:length(x)], n = n)),
+                        error = function(e) rep(NA_real_, length(x) - first_valid + 1))
+  out[first_valid:length(x)] <- valid_sma
+  out
+}
+
 ma_table <- processing_df %>%
   group_by(symbol) %>%
   arrange(date) %>%
+  distinct(date, .keep_all = TRUE) %>%    # guard against duplicate dates (e.g. IBIT weekend rows)
   mutate(
-    # Simple Moving Averages
-    ma10  = SMA(adjusted, n = 10),
-    ma50  = SMA(adjusted, n = 50),
-    ma200 = SMA(adjusted, n = 200),
-    
+    # Simple Moving Averages — safe_sma() handles leading NAs from late-inception tickers
+    ma10  = safe_sma(adjusted, n = 10),
+    ma50  = safe_sma(adjusted, n = 50),
+    ma200 = safe_sma(adjusted, n = 200),
+
     # Multi-Horizon Momentum Distances (Price relative to Anchors)
     dist_10  = (adjusted / ma10) - 1,
     dist_50  = (adjusted / ma50) - 1,

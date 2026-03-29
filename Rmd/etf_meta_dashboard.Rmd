@@ -1,0 +1,367 @@
+---
+title: "ETF Meta Dashboard — Universe Performance & Positioning"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(tidyverse)
+library(reactable)
+library(htmltools)
+library(lubridate)
+library(scales)
+library(here)
+library(knitr)
+```
+
+```{r data, include=FALSE}
+# ── Universe & data ────────────────────────────────────────────────────────
+if (!exists("project_tree")) source(here("project_tree.R"))
+if (!exists("etf_metadata")) source(here(project_tree$scripts$init))
+
+raw_data       <- read_rds(here(project_tree$products$raw_p_d))
+tech_summary   <- read_rds(here(project_tree$products$tech_summary))
+outlier_report <- read_rds(here(project_tree$products$ref_report))
+
+today     <- Sys.Date()
+ytd_start <- as.Date(paste0(year(today), "-01-01"))
+mtd_start <- floor_date(today, "month")
+w52_start <- today - 365
+
+perf_data <- raw_data %>%
+  group_by(symbol) %>%
+  arrange(date) %>%
+  summarise(
+    latest_price = last(adjusted),
+    latest_date  = last(date),
+    price_ytd    = first(adjusted[date >= ytd_start]),
+    price_mtd    = first(adjusted[date >= mtd_start]),
+    low_52w      = min(adjusted[date >= w52_start], na.rm = TRUE),
+    high_52w     = max(adjusted[date >= w52_start], na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    ytd_ret   = (latest_price / price_ytd) - 1,
+    mtd_ret   = (latest_price / price_mtd) - 1,
+    range_pct = pmin(pmax((latest_price - low_52w) / (high_52w - low_52w), 0), 1)
+  ) %>%
+  left_join(
+    etf_metadata %>% select(ticker, name, asset_class, pf_function, tree_level, sub_block),
+    by = c("symbol" = "ticker")
+  ) %>%
+  left_join(
+    tech_summary %>% select(ticker, trend_regime, momentum_status, ma200),
+    by = c("symbol" = "ticker")
+  ) %>%
+  left_join(
+    outlier_report %>% select(ticker, label),
+    by = c("symbol" = "ticker")
+  ) %>%
+  filter(!is.na(ytd_ret), pf_function != "Signal")
+
+regime_colors <- c(
+  "Bullish"            = "#2D6A4F",
+  "Bullish-Correction" = "#F77F00",
+  "Bearish-Relief"     = "#E07B39",
+  "Bearish"            = "#D90429"
+)
+```
+
+---
+
+## 1. Market Snapshot
+
+```{r snapshot-table}
+spy     <- perf_data %>% filter(symbol == "SPY")
+n_bull  <- sum(perf_data$trend_regime == "Bullish",  na.rm = TRUE)
+n_bear  <- sum(perf_data$trend_regime == "Bearish",  na.rm = TRUE)
+n_bcorr <- sum(perf_data$trend_regime == "Bullish-Correction", na.rm = TRUE)
+n_brel  <- sum(perf_data$trend_regime == "Bearish-Relief",     na.rm = TRUE)
+n_total <- nrow(perf_data)
+
+tibble(
+  Metric = c("SPY YTD", "SPY MTD", "SPY 52W Position",
+             "Bullish", "Bullish-Correction", "Bearish-Relief", "Bearish",
+             "Universe (ex-Signal)"),
+  Value  = c(
+    percent(spy$ytd_ret,   accuracy = 0.1, style_positive = "plus"),
+    percent(spy$mtd_ret,   accuracy = 0.1, style_positive = "plus"),
+    percent(spy$range_pct, accuracy = 1),
+    paste0(n_bull,  " / ", n_total),
+    paste0(n_bcorr, " / ", n_total),
+    paste0(n_brel,  " / ", n_total),
+    paste0(n_bear,  " / ", n_total),
+    as.character(n_total)
+  )
+) %>%
+  kable(align = c("l", "r"))
+```
+
+---
+
+## 2. 52-Week Range by Asset Class
+
+Each bar shows where the ETF's current price sits within its 52-week high/low range.
+Colour = trend regime. Right label = YTD return.
+
+```{r range-plot, fig.height=9}
+plot_data <- perf_data %>%
+  mutate(
+    ytd_label    = percent(ytd_ret, accuracy = 0.1, style_positive = "plus"),
+    ticker_label = paste0(symbol, "  ", str_trunc(name, 20))
+  ) %>%
+  arrange(asset_class, range_pct)
+
+ggplot(plot_data, aes(y = reorder(ticker_label, range_pct))) +
+
+  # track
+  geom_segment(aes(x = 0, xend = 1, yend = ticker_label),
+               color = "grey85", linewidth = 2.5, lineend = "round") +
+
+  # filled bar
+  geom_segment(aes(x = 0, xend = range_pct, yend = ticker_label,
+                   color = trend_regime),
+               linewidth = 2.5, lineend = "round") +
+
+  # current position dot
+  geom_point(aes(x = range_pct, color = trend_regime), size = 3) +
+
+  # YTD label
+  geom_text(aes(x = 1.02, label = ytd_label,
+                color = ifelse(ytd_ret >= 0, "#2D6A4F", "#D90429")),
+            hjust = 0, size = 2.7, fontface = "bold") +
+
+  scale_x_continuous(
+    limits = c(0, 1.13),
+    breaks = c(0, 0.25, 0.5, 0.75, 1),
+    labels = c("52W Low", "25%", "50%", "75%", "52W High")
+  ) +
+  scale_color_manual(values = regime_colors, na.value = "grey60") +
+
+  facet_wrap(~ asset_class, scales = "free_y", ncol = 2) +
+
+  labs(
+    title    = paste("52-Week Range Position —", format(today, "%d %b %Y")),
+    subtitle = "Bar = current position within 52W range  |  Right label = YTD return  |  Colour = trend regime",
+    x = NULL, y = NULL, color = "Regime"
+  ) +
+
+  theme_minimal(base_size = 10) +
+  theme(
+    strip.text         = element_text(face = "bold", size = 9),
+    axis.text.y        = element_text(size = 7.5, lineheight = 1.3),
+    axis.text.x        = element_text(color = "grey50", size = 8),
+    panel.grid.major.x = element_line(color = "grey90", linewidth = 0.3),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    legend.position    = "bottom",
+    legend.title       = element_text(size = 9),
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey50", size = 9),
+    plot.margin        = margin(12, 16, 12, 12)
+  )
+```
+
+---
+
+## 3. YTD Return by Asset Class
+
+```{r ytd-plot, fig.height=8}
+perf_data %>%
+  mutate(
+    ticker_label = paste0(symbol, "  ", str_trunc(name, 22)),
+    bar_color    = ifelse(ytd_ret >= 0, "#2D6A4F", "#D90429")
+  ) %>%
+  arrange(asset_class, ytd_ret) %>%
+  ggplot(aes(x = ytd_ret, y = reorder(ticker_label, ytd_ret), fill = ytd_ret >= 0)) +
+
+  geom_col(width = 0.7, show.legend = FALSE) +
+  geom_vline(xintercept = 0, color = "grey40", linewidth = 0.4) +
+
+  geom_text(aes(label = percent(ytd_ret, accuracy = 0.1, style_positive = "plus"),
+                hjust = ifelse(ytd_ret >= 0, -0.15, 1.15)),
+            size = 2.5, color = "grey30") +
+
+  scale_x_continuous(labels = percent_format(accuracy = 1),
+                     expand = expansion(mult = c(0.12, 0.12))) +
+  scale_fill_manual(values = c("TRUE" = "#2D6A4F", "FALSE" = "#D90429")) +
+
+  facet_wrap(~ asset_class, scales = "free_y", ncol = 2) +
+
+  labs(
+    title    = paste("YTD Returns —", format(today, "%d %b %Y")),
+    subtitle = "Sorted ascending within each asset class",
+    x = NULL, y = NULL
+  ) +
+
+  theme_minimal(base_size = 10) +
+  theme(
+    strip.text         = element_text(face = "bold", size = 9),
+    axis.text.y        = element_text(size = 7.5, lineheight = 1.3),
+    axis.text.x        = element_text(color = "grey50", size = 8),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey50", size = 9),
+    plot.margin        = margin(12, 16, 12, 12)
+  )
+```
+
+---
+
+## 4. Regime Breadth
+
+```{r breadth-plot, fig.width=9, fig.height=4}
+perf_data %>%
+  filter(!is.na(trend_regime)) %>%
+  count(asset_class, trend_regime) %>%
+  mutate(trend_regime = factor(trend_regime,
+    levels = c("Bullish", "Bullish-Correction", "Bearish-Relief", "Bearish"))) %>%
+  ggplot(aes(x = n, y = reorder(asset_class, n), fill = trend_regime)) +
+  geom_col(width = 0.65) +
+  scale_fill_manual(values = regime_colors, na.value = "grey70",
+                    drop = FALSE) +
+  labs(
+    title    = "Regime Breadth by Asset Class",
+    subtitle = "Count of ETFs in each trend regime",
+    x = "Number of ETFs", y = NULL, fill = "Regime"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.major.y = element_blank(),
+    legend.position    = "right",
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(color = "grey50", size = 9)
+  )
+```
+
+---
+
+## 5. Full Performance Table
+
+Searchable and sortable. Sorted by YTD return descending.
+
+```{r perf-table}
+tbl_data <- perf_data %>%
+  arrange(desc(ytd_ret)) %>%
+  transmute(
+    Ticker        = symbol,
+    Name          = name,
+    `Asset Class` = asset_class,
+    Function      = pf_function,
+    Price         = latest_price,
+    YTD           = ytd_ret,
+    MTD           = mtd_ret,
+    `52W Low`     = low_52w,
+    `52W High`    = high_52w,
+    `52W Pos`     = range_pct,
+    Regime        = trend_regime,
+    Sigma         = label
+  )
+
+reactable(
+  tbl_data,
+  searchable      = TRUE,
+  sortable        = TRUE,
+  highlight       = TRUE,
+  defaultPageSize = 60,
+  columns = list(
+
+    Ticker = colDef(
+      width = 70,
+      style = list(fontWeight = "bold")
+    ),
+
+    Name = colDef(width = 210, style = list(fontSize = "12px")),
+
+    `Asset Class` = colDef(width = 110, style = list(fontSize = "12px")),
+    Function      = colDef(width = 120, style = list(fontSize = "12px")),
+
+    Price = colDef(
+      width  = 75,
+      format = colFormat(prefix = "$", digits = 2)
+    ),
+
+    YTD = colDef(
+      width  = 80,
+      name   = "YTD %",
+      format = colFormat(percent = TRUE, digits = 1),
+      style  = function(value) {
+        list(color      = if (value >= 0) "#2D6A4F" else "#D90429",
+             fontWeight = "bold")
+      }
+    ),
+
+    MTD = colDef(
+      width  = 80,
+      name   = "MTD %",
+      format = colFormat(percent = TRUE, digits = 1),
+      style  = function(value) {
+        list(color      = if (value >= 0) "#2D6A4F" else "#D90429",
+             fontWeight = "bold")
+      }
+    ),
+
+    `52W Low`  = colDef(width = 75, format = colFormat(prefix = "$", digits = 2),
+                        style = list(fontSize = "12px")),
+    `52W High` = colDef(width = 75, format = colFormat(prefix = "$", digits = 2),
+                        style = list(fontSize = "12px")),
+
+    `52W Pos` = colDef(
+      name  = "52W Range",
+      width = 140,
+      cell  = function(value) {
+        pct   <- round(value * 100)
+        color <- if (value >= 0.7) "#2D6A4F" else if (value <= 0.3) "#D90429" else "#457B9D"
+        htmltools::div(
+          style = "display:flex; align-items:center; gap:6px;",
+          htmltools::div(
+            style = "flex:1; background:#e9ecef; border-radius:3px; height:10px;",
+            htmltools::div(style = paste0(
+              "background:", color, "; width:", pct, "%; height:10px; border-radius:3px;"
+            ))
+          ),
+          htmltools::span(style = "font-size:11px; color:#888; min-width:30px;",
+                          paste0(pct, "%"))
+        )
+      }
+    ),
+
+    Regime = colDef(
+      width = 150,
+      style = function(value) {
+        color <- switch(value %||% "",
+          "Bullish"            = "#2D6A4F",
+          "Bearish"            = "#D90429",
+          "Bullish-Correction" = "#F77F00",
+          "Bearish-Relief"     = "#E07B39",
+          "grey50"
+        )
+        list(color = color, fontWeight = "600", fontSize = "12px")
+      }
+    ),
+
+    Sigma = colDef(
+      width = 130,
+      style = function(value) {
+        list(color    = if (grepl("EXHAUSTION", value %||% "")) "#F77F00" else "grey60",
+             fontSize = "11px")
+      }
+    )
+  )
+)
+```

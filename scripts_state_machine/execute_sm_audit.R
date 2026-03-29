@@ -1,51 +1,46 @@
-# ==============================================================================
+##################################################################################
 # PROJECT: ETF_1DOWNLOAD_2WRANGLE_3SAA
 # FILE PATH: ./scripts_state_machine/execute_sm_audit.R
-# Purpose: Run institutional-grade state audit for a specific ticker
-# ==============================================================================
+# Purpose: Execute Audit using Project Data Dictionary (Relative Strength)
+##################################################################################
 
-library(quantmod)
 library(tidyverse)
 library(patchwork)
 library(scales)
+library(xts)
 
-# Load our new modules
-source("scripts_state_machine/sm_engine.R")
-source("scripts_state_machine/sm_visuals.R") # Ensure plot_sm_institutional is here
+# --- 1. CONNECT TO INFRASTRUCTURE ---
+# Source the visuals which internally contain the Engine Room
+source("scripts_state_machine/sm_visuals.R") 
 
-# --- CONFIGURATION ---
-target_ticker <- "SPY"
+# --- 2. CONFIGURATION & TARGET ---
+# Using the Global Variables defined in our SYSTEM_DATA_DICTIONARY.md
+target_ticker <- "XLK" 
 params <- list(thru = 0.04, thrd = -0.02)
 
-# --- EXECUTION ---
-message(paste("🛡️ Auditing Structural Regime for:", target_ticker))
+# --- 3. VALIDATION CHECK ---
+if(!exists("xts_rel_wlth") | !exists("xts_rel")) {
+  stop("❌ Critical Error: Global variables 'xts_rel_wlth' or 'xts_rel' not found. 
+       Please run 01_etf_wrangle.R first.")
+}
 
-# 1. Get Data
-getSymbols(target_ticker, from = "2018-01-01", auto.assign = TRUE)
-df_raw <- get(target_ticker)
+# --- 4. EXECUTION VIA ORCHESTRATOR ---
+message(paste("🛡️ Auditing Relative Structural Regime for:", target_ticker))
 
-# 2. Wrangle & Calculate Distance
-df_processed <- data.frame(Date = index(df_raw), Close = as.numeric(Cl(df_raw))) %>%
-  mutate(
-    SMA200  = TTR::SMA(Close, n = 200),
-    Dist200 = (Close / SMA200) - 1
-  ) %>%
-  filter(!is.na(SMA200))
-
-# 3. Apply State Machine
-df_processed$Signal <- calc_asymmetric_state(
-  df_processed$Dist200, 
-  thru = params$thru, 
-  thrd = params$thrd
+# We use the Orchestrator plot_200DMA because it:
+#  A. Calls the math engine (get_enriched_xts_data)
+#  B. Handles the 3-panel synchronization (plot_signal_with_dd)
+#  C. Registers the result in key_plots
+p_audit <- plot_200DMA(
+  ticker_symbol = target_ticker,
+  xts_wealth    = xts_rel_wlth, 
+  xts_price     = xts_rel,
+  upper         = params$thru,
+  lower         = params$thrd
 )
 
-# 4. Generate Institutional Plot
-p <- plot_sm_institutional(
-  df_processed, 
-  ticker_name = target_ticker, 
-  thru = params$thru, 
-  thrd = params$thrd
-)
+# --- 5. DISPLAY RESULT ---
+# The orchestrator returns the plot, but also saves it to the global list
+print(p_audit)
 
-# 5. Display Result
-print(p)
+##################################################################################

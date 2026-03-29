@@ -6,18 +6,23 @@
 # ==============================================================================
 
 # --- 0. INITIALIZE INFRASTRUCTURE ---
-rm(list = ls()) # Clear environment for a clean sentinel run
+# rm(list = ls()) was removed 2026-03-22 — pipeline is self-overwriting; each sourced
+# script reassigns its own outputs. Keeping rm() in an interactive session caused
+# stats::rt to shadow the regime table rt, breaking fs_render() and factsheet workflow.
 
 if(!file.exists("project_tree.R")) stop("Critical Error: project_tree.R not found!")
+source("00_libraries.R")
 source("project_tree.R")
 source("00_global_params.R") # Load Signal-Project thresholds (+4%/-2%)
 
+
+forced_refresh=T
 # --- 1. GLOBAL PARAMETERS (The Control Center) ---
 OPTIONS <<- list(
   outlier_method        = "Interquartile", #
   sigma_label_suffix    = " (Analytical Sigma)", #
   show_outliers_in_plot = FALSE,
-  force_fresh_sync      = FALSE,      # Smart-cache toggle
+  force_fresh_sync      = forced_refresh,      # Smart-cache toggle
   run_external_audit    = TRUE        # Finnhub API Check
 )
 
@@ -75,6 +80,7 @@ source(project_tree$scripts$shiny_builder)
 
 # --- 9. EXECUTION ---
 cat("\n[8/8] Invoking UI Renderer...")
-build_and_launch_shiny()
+# build_and_launch_shiny()
 
 cat("\n--- PIPELINE EXECUTION COMPLETE [", as.character(Sys.time()), "] ---\n")
+

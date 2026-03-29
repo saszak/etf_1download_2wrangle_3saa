@@ -1,0 +1,438 @@
+---
+title: "Universe Pair Analysis — Cost–Benefit Vectors"
+subtitle: "Category A (vs SPY) · Category B (vs AGG) · 10% Notional"
+output:
+  pdf_document:
+    toc: true
+    latex_engine: xelatex
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(MASS)
+library(tidyverse)
+library(xts)
+library(scales)
+library(patchwork)
+library(ggrepel)
+library(here)
+
+select <- dplyr::select
+
+if (!exists("xts_ret"))
+  xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+if (!exists("build_regime_table"))
+  source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+
+spy_ret <- xts_ret[, "SPY"]
+rt      <- build_regime_table(spy_ret, 0.10, 0.05)
+
+source(here("utility/plot_xts_pair.R"))
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+T_yrs <- as.numeric(diff(range(index(xts_ret)))) / 365
+
+max_dd_vec <- function(r) {
+  w  <- cumprod(1 + r)
+  min((w - cummax(w)) / cummax(w), na.rm = TRUE)
+}
+
+magdon_mdd <- function(sigma, mu, T) {
+  if (is.na(mu) || mu <= 0) return(sigma * sqrt(T))
+  S <- mu / sigma
+  (sigma / S) * (log(S * sqrt(T)) + 0.35)
+}
+
+pair_stats <- function(out) {
+  s  <- out$stats
+  sp <- s %>% filter(str_detect(Series, "\u2212"))
+  mu  <- parse_number(sp$`Ann Return`) / 100
+  sig <- parse_number(sp$`Ann Vol`)    / 100
+  mdd <- parse_number(sp$`Max DD`)     / 100
+  list(mu = mu, sig = sig, mdd = mdd,
+       ir  = out$full_ir, rho = out$full_cor,
+       te_10pct  = 0.10 * sig,
+       mdd_10pct = 0.10 * abs(mdd),
+       ret_10pct = 0.10 * mu,
+       mdd_theory = magdon_mdd(sig, mu, T_yrs),
+       stats = s)
+}
+
+# ── Shortlists ────────────────────────────────────────────────────────────────
+top10_a <- c("SMH", "XLK", "QQQ", "AIQ", "DXJ",
+             "EWT", "EWC", "XLY", "ITA", "CIBR")
+
+top10_b <- c("GLD", "SLV", "PDBC", "DJP", "URA",
+             "COPX", "DBA", "IGF", "MOO", "LIT")
+```
+
+```{r run-pairs, cache=TRUE, include=FALSE}
+results_a <- set_names(
+  map(top10_a, ~{
+    out <- plot_xts_pair(xts_ret[, .x], xts_ret[, "SPY"],
+                         label1 = .x, label2 = "SPY", rt = rt)
+    list(ticker = .x, category = "A \u2014 vs SPY", out = out, ps = pair_stats(out))
+  }),
+  top10_a
+)
+
+results_b <- set_names(
+  map(top10_b, ~{
+    out <- plot_xts_pair(xts_ret[, .x], xts_ret[, "AGG"],
+                         label1 = .x, label2 = "AGG", rt = rt)
+    list(ticker = .x, category = "B \u2014 vs AGG", out = out, ps = pair_stats(out))
+  }),
+  top10_b
+)
+```
+
+```{r vec-data, include=FALSE}
+# Build vector tibble: one row per ticker
+vec_df <- bind_rows(
+  map_dfr(results_a, function(r) {
+    ps <- r$ps
+    tibble(ticker   = r$ticker,
+           category = r$category,
+           te       = ps$te_10pct,        # TE cost  at 10%
+           ret      = ps$ret_10pct,       # active return at 10%
+           mdd_cost = 0.10 * abs(ps$mdd), # MaxDD cost at 10%
+           ir       = ps$ir,
+           calmar   = ps$mu / abs(ps$mdd),
+           rho      = ps$rho,
+           sig      = ps$sig,
+           mu       = ps$mu)
+  }),
+  map_dfr(results_b, function(r) {
+    ps <- r$ps
+    tibble(ticker   = r$ticker,
+           category = r$category,
+           te       = ps$te_10pct,
+           ret      = ps$ret_10pct,
+           mdd_cost = 0.10 * abs(ps$mdd),
+           ir       = ps$ir,
+           calmar   = ps$mu / abs(ps$mdd),
+           rho      = ps$rho,
+           sig      = ps$sig,
+           mu       = ps$mu)
+  })
+) %>%
+  mutate(
+    angle_ir     = atan2(ret, te)       * 180 / pi,
+    angle_calmar = atan2(ret, mdd_cost) * 180 / pi,
+    magnitude_te = sqrt(te^2 + ret^2),
+    magnitude_mdd= sqrt(mdd_cost^2 + ret^2),
+    zone = case_when(
+      ir >= 1.0  ~ "Exceptional  (IR \u2265 1.0)",
+      ir >= 0.5  ~ "Top quartile  (IR \u2265 0.5)",
+      ir >= 0.0  ~ "Positive but below hurdle",
+      TRUE       ~ "Destroys value  (IR < 0)"
+    )
+  )
+
+CAT_COLS <- c("A \u2014 vs SPY" = "#457B9D", "B \u2014 vs AGG" = "#D90429")
+
+# Convenience filtered subsets
+vec_a <- vec_df %>% filter(str_detect(category, "SPY"))
+vec_b <- vec_df %>% filter(str_detect(category, "AGG"))
+
+# Helper: position reference-line label at x = pct * max(x_var)
+ref_label <- function(df, x_col, slope, pct = 0.75,
+                      prefix = "IR") {
+  x_at <- max(df[[x_col]], na.rm = TRUE) * pct
+  tibble(x     = x_at,
+         y     = slope * x_at,
+         label = sprintf("%s = %.1f", prefix, slope))
+}
+```
+
+```{r plot-fns, include=FALSE}
+# ── Reusable plot functions — called with full or filtered vec_df ──────────────
+
+plot_vec_te <- function(df, subtitle_extra = NULL) {
+  x_max <- max(df$te)  * 1.22
+  y_max <- max(max(df$ret) * 1.30, 0.001)
+  y_min <- min(min(df$ret) * 1.45, -0.001)
+  ref   <- bind_rows(ref_label(df, "te", 0.5, 0.78),
+                     ref_label(df, "te", 1.0, 0.58))
+  sub <- paste0("Arrow slope = IR  |  Steeper = more efficient  |  Below zero = destroys value",
+                if (!is.null(subtitle_extra)) paste0("  |  ", subtitle_extra) else "")
+  ggplot(df) +
+    annotate("rect", xmin = 0, xmax = x_max, ymin = 0, ymax = y_max * 1.2,
+             fill = "#2D6A4F", alpha = 0.04) +
+    geom_abline(slope = 0.5, intercept = 0, linetype = "dashed",
+                colour = "#2D6A4F", linewidth = 0.9) +
+    geom_abline(slope = 1.0, intercept = 0, linetype = "dashed",
+                colour = "#457B9D", linewidth = 0.9) +
+    geom_hline(yintercept = 0, colour = "grey45", linewidth = 0.5) +
+    geom_segment(aes(x = 0, y = 0, xend = te, yend = ret, colour = category),
+                 arrow = arrow(length = unit(0.24, "cm"), type = "open"),
+                 linewidth = 1.05, alpha = 0.88) +
+    geom_point(aes(x = te, y = ret, colour = category), size = 3) +
+    geom_text_repel(aes(x = te, y = ret, label = ticker),
+                    size = 3.3, box.padding = 0.45,
+                    min.segment.length = 0.3, segment.colour = "grey65") +
+    geom_label(data = ref,
+               aes(x = x, y = y, label = label,
+                   colour = c("#2D6A4F", "#457B9D")),
+               fill = "white", size = 3.1,
+               label.padding = unit(0.18, "lines"), label.size = 0,
+               show.legend = FALSE) +
+    annotate("text", x = x_max * 0.01, y = y_max * 1.07,
+             label = "active return > TE cost  (IR > 1.0)",
+             hjust = 0, size = 3, colour = "#457B9D", fontface = "italic") +
+    annotate("text", x = x_max * 0.01, y = y_max * 0.55,
+             label = "top-quartile zone  (IR > 0.5)",
+             hjust = 0, size = 3, colour = "#2D6A4F", fontface = "italic") +
+    scale_colour_manual(values = CAT_COLS, name = NULL) +
+    scale_x_continuous(labels = percent_format(accuracy = 0.01),
+                       limits = c(0, x_max)) +
+    scale_y_continuous(labels = percent_format(accuracy = 0.01),
+                       limits = c(y_min, y_max * 1.18)) +
+    labs(title    = "Panel 1 — TE Cost vs Active Return  (10% notional)",
+         subtitle = sub,
+         x = "Tracking Error added  =  10% \u00d7 \u03c3(spread)",
+         y = "Active return  =  10% \u00d7 E[spread]") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom",
+          plot.title    = element_text(face = "bold", size = 13),
+          plot.subtitle = element_text(colour = "grey50", size = 9))
+}
+
+plot_vec_mdd <- function(df, subtitle_extra = NULL) {
+  x_max <- max(df$mdd_cost) * 1.22
+  y_max <- max(max(df$ret)  * 1.30, 0.001)
+  y_min <- min(min(df$ret)  * 1.45, -0.001)
+  ref   <- bind_rows(ref_label(df, "mdd_cost", 0.5, 0.78, "Calmar"),
+                     ref_label(df, "mdd_cost", 1.0, 0.58, "Calmar"))
+  sub <- paste0("Arrow slope = Calmar  |  X-axis = worst-case portfolio pain at 10% notional",
+                if (!is.null(subtitle_extra)) paste0("  |  ", subtitle_extra) else "")
+  ggplot(df) +
+    annotate("rect", xmin = 0, xmax = x_max, ymin = 0, ymax = y_max * 1.2,
+             fill = "#2D6A4F", alpha = 0.04) +
+    geom_abline(slope = 0.5, intercept = 0, linetype = "dashed",
+                colour = "#2D6A4F", linewidth = 0.9) +
+    geom_abline(slope = 1.0, intercept = 0, linetype = "dashed",
+                colour = "#457B9D", linewidth = 0.9) +
+    geom_hline(yintercept = 0, colour = "grey45", linewidth = 0.5) +
+    geom_segment(aes(x = 0, y = 0, xend = mdd_cost, yend = ret, colour = category),
+                 arrow = arrow(length = unit(0.24, "cm"), type = "open"),
+                 linewidth = 1.05, alpha = 0.88) +
+    geom_point(aes(x = mdd_cost, y = ret, colour = category), size = 3) +
+    geom_text_repel(aes(x = mdd_cost, y = ret, label = ticker),
+                    size = 3.3, box.padding = 0.45,
+                    min.segment.length = 0.3, segment.colour = "grey65") +
+    geom_label(data = ref,
+               aes(x = x, y = y, label = label,
+                   colour = c("#2D6A4F", "#457B9D")),
+               fill = "white", size = 3.1,
+               label.padding = unit(0.18, "lines"), label.size = 0,
+               show.legend = FALSE) +
+    annotate("text", x = x_max * 0.01, y = y_max * 1.07,
+             label = "active return > MaxDD cost  (Calmar > 1.0)",
+             hjust = 0, size = 3, colour = "#457B9D", fontface = "italic") +
+    annotate("text", x = x_max * 0.01, y = y_max * 0.55,
+             label = "top-quartile zone  (Calmar > 0.5)",
+             hjust = 0, size = 3, colour = "#2D6A4F", fontface = "italic") +
+    scale_colour_manual(values = CAT_COLS, name = NULL) +
+    scale_x_continuous(labels = percent_format(accuracy = 0.1),
+                       limits = c(0, x_max)) +
+    scale_y_continuous(labels = percent_format(accuracy = 0.01),
+                       limits = c(y_min, y_max * 1.18)) +
+    labs(title    = "Panel 2 — MaxDD Cost vs Active Return  (10% notional)",
+         subtitle = sub,
+         x = "MaxDD cost  =  10% \u00d7 |MaxDD(spread)|",
+         y = "Active return  =  10% \u00d7 E[spread]") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom",
+          plot.title    = element_text(face = "bold", size = 13),
+          plot.subtitle = element_text(colour = "grey50", size = 9))
+}
+
+plot_vec_compass <- function(df, subtitle_extra = NULL) {
+  angle_05 <- atan(0.5) * 180 / pi
+  angle_10 <- atan(1.0) * 180 / pi
+  r_max    <- max(df$magnitude_te) * 1.20
+  sub <- paste0(
+    "Horizontal = angle arctan(IR)  |  Vertical = vector magnitude  |  Green zone = IR > 0.5",
+    if (!is.null(subtitle_extra)) paste0("  |  ", subtitle_extra) else ""
+  )
+  ggplot(df, aes(x = angle_ir, y = magnitude_te,
+                 colour = category, label = ticker)) +
+    annotate("rect", xmin = angle_05, xmax = 95,
+             ymin = -Inf, ymax = Inf, fill = "#2D6A4F", alpha = 0.04) +
+    geom_vline(xintercept = 0,        colour = "grey50",   linewidth = 0.5) +
+    geom_vline(xintercept = angle_05, linetype = "dashed",
+               colour = "#2D6A4F", linewidth = 0.9) +
+    geom_vline(xintercept = angle_10, linetype = "dashed",
+               colour = "#457B9D", linewidth = 0.9) +
+    geom_hline(yintercept = 0, colour = "grey80") +
+    geom_point(size = 3.5, alpha = 0.88) +
+    geom_text_repel(size = 3.3, box.padding = 0.45,
+                    segment.colour = "grey65", show.legend = FALSE) +
+    annotate("text", x = angle_05 + 0.8, y = r_max * 0.97,
+             hjust = 0, size = 3, colour = "#2D6A4F", label = "IR = 0.50") +
+    annotate("text", x = angle_10 + 0.8, y = r_max * 0.97,
+             hjust = 0, size = 3, colour = "#457B9D", label = "IR = 1.00") +
+    annotate("text", x = -0.8, y = r_max * 0.97,
+             hjust = 1, size = 3, colour = "grey50",
+             label = "IR = 0\n(breakeven)") +
+    scale_colour_manual(values = CAT_COLS, name = NULL) +
+    scale_x_continuous(
+      breaks = c(-45, 0, angle_05, angle_10, 45, 90),
+      labels = c("-45\u00b0\n(IR=-1)", "0\u00b0\n(IR=0)",
+                 sprintf("%.1f\u00b0\n(IR=0.5)", angle_05),
+                 sprintf("%.0f\u00b0\n(IR=1.0)", angle_10),
+                 "45\u00b0", "90\u00b0\n(IR=+inf)"),
+      limits = c(-55, 95)
+    ) +
+    scale_y_continuous(labels = percent_format(accuracy = 0.01),
+                       limits = c(0, r_max)) +
+    labs(title    = "Panel 3 — Efficiency Compass  (TE-based vectors)",
+         subtitle = sub,
+         x = "Vector angle  (IR direction)",
+         y = "Vector magnitude  =  sqrt(TE^2 + ActiveRet^2)") +
+    theme_minimal(base_size = 12) +
+    theme(panel.grid.minor = element_blank(), legend.position = "bottom",
+          plot.title    = element_text(face = "bold", size = 13),
+          plot.subtitle = element_text(colour = "grey50", size = 9))
+}
+```
+
+---
+
+## The Vector Framework
+
+Every active allocation decision at 10% notional creates a 2-D vector:
+
+$$\vec{v} = \bigl(\underbrace{x}_{\text{cost at 10\%}},\;\underbrace{y}_{\text{active return at 10\%}}\bigr)$$
+
+| Component | Panel 1 | Panel 2 |
+|---|---|---|
+| **x (cost)** | Tracking Error added = 10% × σ(spread) | MaxDD added = 10% × \|MaxDD(spread)\| |
+| **y (benefit)** | Active return = 10% × E[spread] | Active return = 10% × E[spread] |
+| **Slope = ratio** | **IR** = E[spread] / σ(spread) | **Calmar** = E[spread] / \|MaxDD\| |
+
+The **steeper** the arrow, the better the risk-adjusted payoff.
+The dashed reference lines at slope 0.5 and 1.0 are the key hurdles.
+
+---
+
+## Panel 1 — Tracking Error Cost vs Active Return {.tabset}
+
+*Slope of arrow = Information Ratio*
+
+### All
+
+```{r vec-te-all, fig.height=8}
+plot_vec_te(vec_df)
+```
+
+### Category A — vs SPY
+
+```{r vec-te-a, fig.height=8}
+plot_vec_te(vec_a, "Category A: equity swaps only")
+```
+
+### Category B — vs AGG
+
+```{r vec-te-b, fig.height=8}
+plot_vec_te(vec_b, "Category B: cross-asset additions only")
+```
+
+## {-}
+
+---
+
+## Panel 2 — MaxDD Cost vs Active Return {.tabset}
+
+*Slope of arrow = Calmar ratio*
+
+### All
+
+```{r vec-mdd-all, fig.height=8}
+plot_vec_mdd(vec_df)
+```
+
+### Category A — vs SPY
+
+```{r vec-mdd-a, fig.height=8}
+plot_vec_mdd(vec_a, "Category A: equity swaps only")
+```
+
+### Category B — vs AGG
+
+```{r vec-mdd-b, fig.height=8}
+plot_vec_mdd(vec_b, "Category B: cross-asset additions only")
+```
+
+## {-}
+
+---
+
+## Panel 3 — Efficiency Compass {.tabset}
+
+Same vectors re-expressed in polar coordinates:
+**angle** = IR quality (how steep the vector is),
+**radius** = magnitude (how large the bet is).
+
+### All
+
+```{r vec-compass-all, fig.height=7}
+plot_vec_compass(vec_df)
+```
+
+### Category A — vs SPY
+
+```{r vec-compass-a, fig.height=7}
+plot_vec_compass(vec_a, "Category A: equity swaps only")
+```
+
+### Category B — vs AGG
+
+```{r vec-compass-b, fig.height=7}
+plot_vec_compass(vec_b, "Category B: cross-asset additions only")
+```
+
+## {-}
+
+---
+
+## Summary Table
+
+```{r vec-table}
+vec_df %>%
+  arrange(desc(ir)) %>%
+  transmute(
+    Category       = category,
+    Ticker         = ticker,
+    IR             = round(ir,     2),
+    Calmar         = round(calmar, 2),
+    `Angle (deg)`  = round(angle_ir, 1),
+    `TE cost`      = percent(te,       accuracy = 0.01),
+    `MDD cost`     = percent(mdd_cost, accuracy = 0.1),
+    `Act. ret`     = percent(ret,      accuracy = 0.01),
+    Zone           = zone
+  ) %>%
+  knitr::kable(caption = "All 20 tickers: IR angle, cost decomposition, and efficiency zone")
+```
+
+---
+
+*Benchmark: SPY for Category A (equity swap), AGG for Category B (cross-asset).
+All costs and returns scaled to 10% notional. Data: `xts_ret_returns.rds`.*

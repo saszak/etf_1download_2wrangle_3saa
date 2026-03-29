@@ -1,0 +1,628 @@
+---
+title: "Universe Pair Analysis — Category A & B Shortlists"
+subtitle: "Top 10 Equity Swaps (vs SPY) · Top 10 Cross-Asset Additions (vs AGG)"
+output:
+  pdf_document:
+    toc: true
+    latex_engine: xelatex
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = FALSE,
+  message    = FALSE,
+  warning    = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(MASS)
+library(tidyverse)
+library(xts)
+library(scales)
+library(patchwork)
+library(here)
+
+select <- dplyr::select
+
+if (!exists("xts_ret"))
+  xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+if (!exists("build_regime_table"))
+  source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+
+spy_ret <- xts_ret[, "SPY"]
+rt      <- build_regime_table(spy_ret, 0.10, 0.05)
+
+source(here("utility/plot_xts_pair.R"))
+
+# ── Helpers shared with scoring ───────────────────────────────────────────────
+T_yrs <- as.numeric(diff(range(index(xts_ret)))) / 365
+
+max_dd_vec <- function(r) {
+  w  <- cumprod(1 + r)
+  dd <- (w - cummax(w)) / cummax(w)
+  min(dd, na.rm = TRUE)
+}
+
+magdon_mdd <- function(sigma, mu, T) {
+  if (is.na(mu) || mu <= 0) return(sigma * sqrt(T))
+  S <- mu / sigma
+  (sigma / S) * (log(S * sqrt(T)) + 0.35)
+}
+
+pair_stats <- function(out) {
+  s  <- out$stats
+  sp <- s %>% filter(str_detect(Series, "\u2212"))   # "−" minus sign
+  mu  <- parse_number(sp$`Ann Return`) / 100
+  sig <- parse_number(sp$`Ann Vol`)    / 100
+  mdd <- parse_number(sp$`Max DD`)     / 100
+  list(
+    mu         = mu,
+    sig        = sig,
+    mdd        = mdd,
+    ir         = out$full_ir,
+    rho        = out$full_cor,
+    te_10pct   = 0.10 * sig,
+    mdd_10pct  = 0.10 * abs(mdd),
+    ret_10pct  = 0.10 * mu,
+    mdd_theory = magdon_mdd(sig, mu, T_yrs),
+    stats      = s
+  )
+}
+
+# ── Scoring components (reproduced from ticker_scoring.R) ─────────────────────
+minmax <- function(x) {
+  rng <- range(x, na.rm = TRUE)
+  if (diff(rng) == 0) return(rep(0.5, length(x)))
+  (x - rng[1]) / diff(rng)
+}
+
+spread_raw <- function(ticker, benchmark) {
+  both <- merge(xts_ret[, ticker], xts_ret[, benchmark], join = "inner")
+  both <- na.omit(both)
+  r_t  <- as.numeric(both[, 1])
+  r_b  <- as.numeric(both[, 2])
+  r_s  <- r_t - r_b
+  T_y  <- nrow(both) / 252
+  mu_s <- mean(r_s) * 252;  sig_s <- sd(r_s) * sqrt(252)
+  ir   <- if (sig_s > 0) mu_s / sig_s else NA_real_
+  mdd  <- max_dd_vec(r_s)
+  cal  <- if (abs(mdd) > 0) mu_s / abs(mdd) else NA_real_
+  rho  <- cor(r_t, r_b, use = "complete.obs")
+  tibble(ticker, benchmark, T_yrs = T_y,
+         mu_spr = mu_s, sig_spr = sig_s, ir, mdd_spr = mdd,
+         calmar = cal, rho,
+         te_10pct = 0.10 * sig_s,
+         mdd_theory = magdon_mdd(sig_s, mu_s, T_y))
+}
+
+# ── Category definitions (top-10 shortlists from scoring) ─────────────────────
+top10_a_tickers <- c("SMH", "XLK", "QQQ", "AIQ", "DXJ",
+                     "EWT", "EWC", "XLY", "ITA", "CIBR")
+
+top10_b_tickers <- c("GLD", "SLV", "PDBC", "DJP", "URA",
+                     "COPX", "DBA", "IGF", "MOO", "LIT")
+
+# Score tables for summary sections
+scores_a <- map_dfr(top10_a_tickers, ~spread_raw(.x, "SPY")) %>%
+  mutate(ir_s = minmax(ir), cal_s = minmax(calmar), rho_s = minmax(rho),
+         score = 0.50 * ir_s + 0.30 * cal_s + 0.20 * rho_s) %>%
+  arrange(desc(score))
+
+scores_b <- map_dfr(top10_b_tickers, ~spread_raw(.x, "AGG")) %>%
+  mutate(ir_s = minmax(ir), cal_s = minmax(calmar), rho_s = minmax(-rho),
+         score = 0.50 * ir_s + 0.30 * cal_s + 0.20 * rho_s) %>%
+  arrange(desc(score))
+
+REGIME_COLORS <- c(Fall = "#D90429", Recovery = "#F77F00",
+                   Consolidation = "#2D6A4F")
+```
+
+---
+
+## Scoring Framework
+
+Every ticker is scored against its category benchmark (SPY for A, AGG for B)
+using the spread between the ticker and the benchmark:
+
+$$\text{Score} = 0.50 \times \widehat{IR} + 0.30 \times \widehat{\text{Calmar}} + 0.20 \times \widehat{\rho}_{\text{adj}}$$
+
+where $\hat{\cdot}$ denotes min-max normalisation within the category, and:
+
+- **IR** = $E[\text{spread}] / \sigma[\text{spread}]$ — quality of the active bet
+- **Calmar** = $E[\text{spread}] / |\text{MaxDD}_{\text{spread}}|$ — drawdown efficiency
+- **ρ_adj**: for A, reward **high** ρ (lower TE per notional);
+  for B, reward **low / negative** ρ (stronger cross-asset diversification)
+
+```{r score-tables}
+bind_rows(
+  scores_a %>% mutate(Category = "A — vs SPY"),
+  scores_b %>% mutate(Category = "B — vs AGG")
+) %>%
+  transmute(
+    Category,
+    Ticker   = ticker,
+    `E[spr]` = percent(mu_spr,  accuracy = 0.1),
+    `σ(spr)` = percent(sig_spr, accuracy = 0.1),
+    IR       = round(ir,      2),
+    Calmar   = round(calmar,  2),
+    `ρ`      = round(rho,     2),
+    MaxDD    = percent(mdd_spr, accuracy = 0.1),
+    `TE(10%)`= percent(te_10pct, accuracy = 0.01),
+    Score    = round(score,   3)
+  ) %>%
+  knitr::kable(caption = "Scoring summary — top 10 per category")
+```
+
+---
+
+## Category A — Equity Swaps (vs SPY) {.tabset}
+
+> **Decision:** +10% ticker / −10% SPY — total equity unchanged, sector/style tilt added.
+> High ρ with SPY → low spread vol → small TE per notional.
+
+```{r run-cat-a, cache=TRUE, include=FALSE}
+results_a <- map(top10_a_tickers, function(tk) {
+  out <- plot_xts_pair(
+    xts_ret[, tk], xts_ret[, "SPY"],
+    label1 = tk, label2 = "SPY",
+    rt     = rt
+  )
+  list(ticker = tk, out = out, ps = pair_stats(out))
+})
+names(results_a) <- top10_a_tickers
+```
+
+### A1 · SMH — Semiconductors
+
+```{r a-smh, fig.height=35}
+print(results_a[["SMH"]]$out$combined)
+```
+
+### A2 · XLK — Technology
+
+```{r a-xlk, fig.height=35}
+print(results_a[["XLK"]]$out$combined)
+```
+
+### A3 · QQQ — Nasdaq 100
+
+```{r a-qqq, fig.height=35}
+print(results_a[["QQQ"]]$out$combined)
+```
+
+### A4 · AIQ — AI & Big Data
+
+```{r a-aiq, fig.height=35}
+print(results_a[["AIQ"]]$out$combined)
+```
+
+### A5 · DXJ — Japan Hedged Equity
+
+```{r a-dxj, fig.height=35}
+print(results_a[["DXJ"]]$out$combined)
+```
+
+### A6 · EWT — Taiwan
+
+```{r a-ewt, fig.height=35}
+print(results_a[["EWT"]]$out$combined)
+```
+
+### A7 · EWC — Canada
+
+```{r a-ewc, fig.height=35}
+print(results_a[["EWC"]]$out$combined)
+```
+
+### A8 · XLY — Consumer Discretionary
+
+```{r a-xly, fig.height=35}
+print(results_a[["XLY"]]$out$combined)
+```
+
+### A9 · ITA — Aerospace & Defense
+
+```{r a-ita, fig.height=35}
+print(results_a[["ITA"]]$out$combined)
+```
+
+### A10 · CIBR — Cybersecurity
+
+```{r a-cibr, fig.height=35}
+print(results_a[["CIBR"]]$out$combined)
+```
+
+## {-}
+
+### Category A — Summary Comparison
+
+```{r cat-a-summary-table}
+map_dfr(results_a, function(r) {
+  ps <- r$ps
+  sc <- scores_a %>% filter(ticker == r$ticker)
+  tibble(
+    Ticker         = r$ticker,
+    `E[spread]`    = percent(ps$mu,        accuracy = 0.1),
+    `σ(spread)`    = percent(ps$sig,       accuracy = 0.1),
+    IR             = round(ps$ir,          2),
+    Calmar         = round(ps$mu / abs(ps$mdd), 2),
+    `ρ(SPY)`       = round(ps$rho,         2),
+    `MaxDD spread` = percent(ps$mdd,       accuracy = 0.1),
+    `TE(10%)`      = percent(ps$te_10pct,  accuracy = 0.02),
+    `Active ret`   = percent(ps$ret_10pct, accuracy = 0.02),
+    `MI MaxDD`     = percent(ps$mdd_theory,accuracy = 0.1),
+    Score          = round(sc$score,       3)
+  )
+}) %>%
+  arrange(desc(IR)) %>%
+  knitr::kable(caption = "Category A — all ten tickers ranked by IR")
+```
+
+```{r cat-a-ir-bar, fig.height=5}
+map_dfr(results_a, function(r) {
+  ps <- r$ps
+  tibble(ticker = r$ticker, ir = ps$ir, rho = ps$rho,
+         mu = ps$mu, sig = ps$sig)
+}) %>%
+  mutate(
+    p_correct = 0.5 + ir / 2,
+    colour    = if_else(ir > 0, "#2D6A4F", "#D90429"),
+    ticker    = fct_reorder(ticker, ir)
+  ) %>%
+  ggplot(aes(x = ticker, y = ir, fill = colour)) +
+  geom_col(width = 0.65, alpha = 0.85) +
+  geom_hline(yintercept = 0.50, linetype = "dashed",
+             colour = "#2D6A4F", linewidth = 0.8) +
+  geom_hline(yintercept = 0,    colour = "grey30") +
+  annotate("text", x = 0.6, y = 0.52, hjust = 0, size = 3,
+           colour = "#2D6A4F", label = "IR = 0.50 (top quartile)") +
+  geom_text(aes(label = sprintf("P=%.0f%%", pmax(p_correct, 1 - p_correct) * 100),
+                hjust = if_else(ir >= 0, -0.15, 1.15)),
+            size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_fill_identity() +
+  scale_y_continuous(expand = expansion(mult = c(0.15, 0.2))) +
+  labs(title    = "Category A — Information Ratio vs SPY",
+       subtitle = "P label = probability of a correct daily directional call  |  Dashed = top-quartile IR",
+       x = NULL, y = "IR") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor   = element_blank(),
+        panel.grid.major.y = element_blank(),
+        plot.title         = element_text(face = "bold", size = 13),
+        plot.subtitle      = element_text(colour = "grey50", size = 9))
+```
+
+```{r cat-a-spread-vol, fig.height=5}
+map_dfr(results_a, function(r) {
+  ps <- r$ps
+  tibble(ticker = r$ticker, sig_spr = ps$sig, te = ps$te_10pct,
+         ir = ps$ir, rho = ps$rho)
+}) %>%
+  mutate(ticker = fct_reorder(ticker, sig_spr)) %>%
+  ggplot(aes(x = ticker, y = sig_spr)) +
+  geom_col(aes(fill = rho), width = 0.65, alpha = 0.85) +
+  geom_text(aes(label = sprintf("ρ=%.2f", rho)),
+            hjust = -0.15, size = 3.2) +
+  coord_flip() +
+  scale_fill_gradient2(low = "#D90429", mid = "grey80", high = "#2D6A4F",
+                       midpoint = 0.80,
+                       name = "ρ(SPY)",
+                       breaks = c(0.5, 0.7, 0.9)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(title    = "Category A — Spread Volatility and ρ(SPY)",
+       subtitle = "Higher ρ (greener) = lower TE per 10% notional\nTE added = 10% × spread vol",
+       x = NULL, y = "Annualised Spread Vol") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor   = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.position    = "right",
+        plot.title         = element_text(face = "bold", size = 13),
+        plot.subtitle      = element_text(colour = "grey50", size = 9))
+```
+
+```{r cat-a-mdd-theory, fig.height=5}
+map_dfr(results_a, function(r) {
+  ps <- r$ps
+  tibble(ticker = r$ticker, actual = abs(ps$mdd), theory = abs(ps$mdd_theory),
+         ir = ps$ir)
+}) %>%
+  mutate(ticker = fct_reorder(ticker, actual)) %>%
+  pivot_longer(c(actual, theory), names_to = "type", values_to = "mdd") %>%
+  mutate(type = if_else(type == "actual", "Realised MaxDD", "Magdon-Ismail E[MaxDD]")) %>%
+  ggplot(aes(x = ticker, y = mdd, fill = type)) +
+  geom_col(position = "dodge", width = 0.65, alpha = 0.85) +
+  coord_flip() +
+  scale_fill_manual(values = c("Realised MaxDD" = "#D90429",
+                                "Magdon-Ismail E[MaxDD]" = "#457B9D"),
+                    name = NULL) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(title    = "Category A — Spread MaxDD: Realised vs Magdon-Ismail Theory",
+       subtitle = "Realised > theory signals a path unfavourable to the spread",
+       x = NULL, y = "MaxDD (absolute)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor   = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.position    = "bottom",
+        plot.title         = element_text(face = "bold", size = 13),
+        plot.subtitle      = element_text(colour = "grey50", size = 9))
+```
+
+---
+
+## Category B — Cross-Asset Additions (vs AGG) {.tabset}
+
+> **Decision:** +10% ticker / −10% AGG — equity exposure rises from 60% to 70%,
+> funded by reducing bonds. Negative or low ρ with AGG → diversification benefit
+> but large spread vol.
+
+```{r run-cat-b, cache=TRUE, include=FALSE}
+results_b <- map(top10_b_tickers, function(tk) {
+  out <- plot_xts_pair(
+    xts_ret[, tk], xts_ret[, "AGG"],
+    label1 = tk, label2 = "AGG",
+    rt     = rt
+  )
+  list(ticker = tk, out = out, ps = pair_stats(out))
+})
+names(results_b) <- top10_b_tickers
+```
+
+### B1 · GLD — Gold
+
+```{r b-gld, fig.height=35}
+print(results_b[["GLD"]]$out$combined)
+```
+
+### B2 · SLV — Silver
+
+```{r b-slv, fig.height=35}
+print(results_b[["SLV"]]$out$combined)
+```
+
+### B3 · PDBC — Broad Commodities (Optimum Yield)
+
+```{r b-pdbc, fig.height=35}
+print(results_b[["PDBC"]]$out$combined)
+```
+
+### B4 · DJP — Bloomberg Commodity Index
+
+```{r b-djp, fig.height=35}
+print(results_b[["DJP"]]$out$combined)
+```
+
+### B5 · URA — Uranium
+
+```{r b-ura, fig.height=35}
+print(results_b[["URA"]]$out$combined)
+```
+
+### B6 · COPX — Copper Miners
+
+```{r b-copx, fig.height=35}
+print(results_b[["COPX"]]$out$combined)
+```
+
+### B7 · DBA — Agriculture Futures
+
+```{r b-dba, fig.height=35}
+print(results_b[["DBA"]]$out$combined)
+```
+
+### B8 · IGF — Global Infrastructure
+
+```{r b-igf, fig.height=35}
+print(results_b[["IGF"]]$out$combined)
+```
+
+### B9 · MOO — Agribusiness
+
+```{r b-moo, fig.height=35}
+print(results_b[["MOO"]]$out$combined)
+```
+
+### B10 · LIT — Lithium & Battery Tech
+
+```{r b-lit, fig.height=35}
+print(results_b[["LIT"]]$out$combined)
+```
+
+## {-}
+
+### Category B — Summary Comparison
+
+```{r cat-b-summary-table}
+map_dfr(results_b, function(r) {
+  ps <- r$ps
+  sc <- scores_b %>% filter(ticker == r$ticker)
+  tibble(
+    Ticker         = r$ticker,
+    `E[spread]`    = percent(ps$mu,        accuracy = 0.1),
+    `σ(spread)`    = percent(ps$sig,       accuracy = 0.1),
+    IR             = round(ps$ir,          2),
+    Calmar         = round(ps$mu / abs(ps$mdd), 2),
+    `ρ(AGG)`       = round(ps$rho,         2),
+    `MaxDD spread` = percent(ps$mdd,       accuracy = 0.1),
+    `TE(10%)`      = percent(ps$te_10pct,  accuracy = 0.02),
+    `Active ret`   = percent(ps$ret_10pct, accuracy = 0.02),
+    `MI MaxDD`     = percent(ps$mdd_theory,accuracy = 0.1),
+    Score          = round(sc$score,       3)
+  )
+}) %>%
+  arrange(desc(IR)) %>%
+  knitr::kable(caption = "Category B — all ten tickers ranked by IR")
+```
+
+```{r cat-b-ir-bar, fig.height=5}
+map_dfr(results_b, function(r) {
+  ps <- r$ps
+  tibble(ticker = r$ticker, ir = ps$ir, rho = ps$rho)
+}) %>%
+  mutate(
+    p_correct = 0.5 + ir / 2,
+    colour    = if_else(ir > 0, "#2D6A4F", "#D90429"),
+    ticker    = fct_reorder(ticker, ir)
+  ) %>%
+  ggplot(aes(x = ticker, y = ir, fill = colour)) +
+  geom_col(width = 0.65, alpha = 0.85) +
+  geom_hline(yintercept = 0.50, linetype = "dashed",
+             colour = "#2D6A4F", linewidth = 0.8) +
+  geom_hline(yintercept = 0,    colour = "grey30") +
+  annotate("text", x = 0.6, y = 0.52, hjust = 0, size = 3,
+           colour = "#2D6A4F", label = "IR = 0.50 (top quartile)") +
+  geom_text(aes(label = sprintf("P=%.0f%%", pmax(p_correct, 1 - p_correct) * 100),
+                hjust = if_else(ir >= 0, -0.15, 1.15)),
+            size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_fill_identity() +
+  scale_y_continuous(expand = expansion(mult = c(0.15, 0.2))) +
+  labs(title    = "Category B — Information Ratio vs AGG",
+       subtitle = "P label = probability of a correct daily directional call  |  Dashed = top-quartile IR",
+       x = NULL, y = "IR") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor   = element_blank(),
+        panel.grid.major.y = element_blank(),
+        plot.title         = element_text(face = "bold", size = 13),
+        plot.subtitle      = element_text(colour = "grey50", size = 9))
+```
+
+```{r cat-b-spread-vol, fig.height=5}
+map_dfr(results_b, function(r) {
+  ps <- r$ps
+  tibble(ticker = r$ticker, sig_spr = ps$sig, rho = ps$rho, ir = ps$ir)
+}) %>%
+  mutate(ticker = fct_reorder(ticker, sig_spr)) %>%
+  ggplot(aes(x = ticker, y = sig_spr)) +
+  geom_col(aes(fill = rho), width = 0.65, alpha = 0.85) +
+  geom_text(aes(label = sprintf("ρ=%.2f", rho)),
+            hjust = -0.15, size = 3.2) +
+  coord_flip() +
+  scale_fill_gradient2(low = "#2D6A4F", mid = "grey80", high = "#D90429",
+                       midpoint = 0,
+                       name = "ρ(AGG)") +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     expand = expansion(mult = c(0, 0.15))) +
+  labs(title    = "Category B — Spread Volatility and ρ(AGG)",
+       subtitle = "Lower / more-negative ρ (greener) = stronger diversification from bonds\nTE added = 10% × spread vol",
+       x = NULL, y = "Annualised Spread Vol") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor   = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.position    = "right",
+        plot.title         = element_text(face = "bold", size = 13),
+        plot.subtitle      = element_text(colour = "grey50", size = 9))
+```
+
+```{r cat-b-mdd-theory, fig.height=5}
+map_dfr(results_b, function(r) {
+  ps <- r$ps
+  tibble(ticker = r$ticker, actual = abs(ps$mdd), theory = abs(ps$mdd_theory),
+         ir = ps$ir)
+}) %>%
+  mutate(ticker = fct_reorder(ticker, actual)) %>%
+  pivot_longer(c(actual, theory), names_to = "type", values_to = "mdd") %>%
+  mutate(type = if_else(type == "actual", "Realised MaxDD", "Magdon-Ismail E[MaxDD]")) %>%
+  ggplot(aes(x = ticker, y = mdd, fill = type)) +
+  geom_col(position = "dodge", width = 0.65, alpha = 0.85) +
+  coord_flip() +
+  scale_fill_manual(values = c("Realised MaxDD" = "#D90429",
+                                "Magdon-Ismail E[MaxDD]" = "#457B9D"),
+                    name = NULL) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(title    = "Category B — Spread MaxDD: Realised vs Magdon-Ismail Theory",
+       subtitle = "Realised > theory signals a path unfavourable to the spread",
+       x = NULL, y = "MaxDD (absolute)") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor   = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.position    = "bottom",
+        plot.title         = element_text(face = "bold", size = 13),
+        plot.subtitle      = element_text(colour = "grey50", size = 9))
+```
+
+---
+
+## Cross-Category Comparison
+
+All 20 tickers on a common footing — spread IR vs spread vol,
+coloured by category.
+
+```{r cross-ir-vol, fig.height=6}
+bind_rows(
+  map_dfr(results_a, function(r) {
+    ps <- r$ps
+    tibble(ticker = r$ticker, category = "A — vs SPY",
+           ir = ps$ir, sig = ps$sig, rho = ps$rho, mu = ps$mu)
+  }),
+  map_dfr(results_b, function(r) {
+    ps <- r$ps
+    tibble(ticker = r$ticker, category = "B — vs AGG",
+           ir = ps$ir, sig = ps$sig, rho = ps$rho, mu = ps$mu)
+  })
+) %>%
+  ggplot(aes(x = sig, y = ir, colour = category, label = ticker)) +
+  geom_hline(yintercept = c(0, 0.50), linetype = c("solid","dashed"),
+             colour = c("grey70","#2D6A4F"), linewidth = 0.7) +
+  geom_point(aes(size = abs(mu)), alpha = 0.8) +
+  ggrepel::geom_text_repel(size = 3.2, show.legend = FALSE) +
+  scale_colour_manual(values = c("A — vs SPY" = "#457B9D",
+                                  "B — vs AGG" = "#D90429"),
+                      name = NULL) +
+  scale_size_continuous(range = c(3, 9), name = "|E[spread]|") +
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  labs(title    = "Spread IR vs Spread Vol — All 20 Shortlisted Tickers",
+       subtitle = "Point size = |E[spread]|  |  Dashed = IR 0.50 top-quartile  |  Blue = equity swap, Red = cross-asset",
+       x = "Annualised Spread Vol", y = "Information Ratio") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        legend.position  = "bottom",
+        plot.title       = element_text(face = "bold", size = 13),
+        plot.subtitle    = element_text(colour = "grey50", size = 9))
+```
+
+```{r cross-master-table}
+bind_rows(
+  map_dfr(results_a, function(r) {
+    ps <- r$ps; sc <- scores_a %>% filter(ticker == r$ticker)
+    tibble(Category = "A — vs SPY", Ticker = r$ticker,
+           `E[spr]` = percent(ps$mu,  accuracy = 0.1),
+           `σ(spr)` = percent(ps$sig, accuracy = 0.1),
+           IR       = round(ps$ir, 2),
+           Calmar   = round(ps$mu / abs(ps$mdd), 2),
+           ρ        = round(ps$rho, 2),
+           MaxDD    = percent(ps$mdd, accuracy = 0.1),
+           `TE(10%)`= percent(ps$te_10pct, accuracy = 0.02),
+           Score    = round(sc$score, 3))
+  }),
+  map_dfr(results_b, function(r) {
+    ps <- r$ps; sc <- scores_b %>% filter(ticker == r$ticker)
+    tibble(Category = "B — vs AGG", Ticker = r$ticker,
+           `E[spr]` = percent(ps$mu,  accuracy = 0.1),
+           `σ(spr)` = percent(ps$sig, accuracy = 0.1),
+           IR       = round(ps$ir, 2),
+           Calmar   = round(ps$mu / abs(ps$mdd), 2),
+           ρ        = round(ps$rho, 2),
+           MaxDD    = percent(ps$mdd, accuracy = 0.1),
+           `TE(10%)`= percent(ps$te_10pct, accuracy = 0.02),
+           Score    = round(sc$score, 3))
+  })
+) %>%
+  arrange(Category, desc(IR)) %>%
+  knitr::kable(caption = "Master table — all 20 shortlisted tickers")
+```
+
+---
+
+*Benchmark: SPY for Category A (equity swap), AGG for Category B (cross-asset addition).
+All decisions at 10% notional. Data: `xts_ret_returns.rds` | SPY regimes: Fall ≥10% drawdown.*

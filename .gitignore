@@ -1,0 +1,34 @@
+# R session artefacts
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+Rplots.pdf
+output.pdf
+regimes.png
+
+# Data (raw + processed — never commit data)
+input/
+01_data_raw/
+02_data_processed/
+
+# Generated HTML reports (render output, not source)
+03_reports/*.html
+03_reports/*_files/
+03_reports/*.png
+
+# Generated plot images in key_plots (source .R files are tracked)
+key_plots/*.png
+key_plots/*.html
+
+# Office lock files
+doc/.~lock.*
+
+# Claude conversation logs (large JSONL — memory .md files ARE tracked)
+.claude/projects/
+
+# Rmd generated outputs (keep only .Rmd source)
+Rmd/*.html
+Rmd/*.pdf
+Rmd/*_cache/
+Rmd/*_files/

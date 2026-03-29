@@ -1,0 +1,2753 @@
+---
+title: "ETF Intelligence — Executive Summary"
+subtitle: 'A Connected Journey: SPY Regime → Alpha Extraction → Exante Hypothesis'
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    toc_depth: 2
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    latex_engine: xelatex
+---
+
+<style>
+.insight-box {
+  background-color: #f0f4f8;
+  border-left: 4px solid #2c3e50;
+  padding: 10px 16px;
+  margin: 16px 0;
+  border-radius: 0 4px 4px 0;
+}
+.finding-box {
+  background-color: #eafaf1;
+  border-left: 4px solid #27ae60;
+  padding: 10px 16px;
+  margin: 16px 0;
+  border-radius: 0 4px 4px 0;
+}
+.challenge-box {
+  background-color: #fef9e7;
+  border-left: 4px solid #f39c12;
+  padding: 10px 16px;
+  margin: 16px 0;
+  border-radius: 0 4px 4px 0;
+}
+h2 { border-bottom: 2px solid #2c3e50; padding-bottom: 4px; }
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(MASS)
+library(tidyverse)
+library(xts)
+library(PerformanceAnalytics)
+library(scales)
+library(patchwork)
+library(ggrepel)
+library(here)
+library(kableExtra)
+
+select  <- dplyr::select
+filter  <- dplyr::filter
+arrange <- dplyr::arrange
+
+# ── Core data ─────────────────────────────────────────────────────────────────
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+xts_rel <- readRDS(here("02_data_processed/xts_rel.rds"))
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+source(here("scripts/00_init_universe.R"))
+source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+source(here("scripts_spy_dd_regime/spy_dd_regime_rel.R"))
+source(here("scripts_spy_dd_regime/regime_multi_ticker.R"))
+source(here("scripts_spy_dd_regime/spy_statemachine_diagram_rel.R"))
+source(here("scripts_state_machine/sm_engine.R"))
+source(here("scripts_state_machine/sm_visuals.R"))
+source(here("scripts_saa_structured/long_short_overlay.R"))
+source(here("scripts_saa_taa/05_saa_portfolio.R"))
+source(here("scripts_exante_hypothesis/exante_engine.R"))
+source(here("scripts_exante_hypothesis/exante_visuals.R"))
+source(here("scripts_saa_taa/saa_tree.R"))
+source(here("utility/plot_xts_pair.R"))
+source(here("utility/etf_ranges.R"))
+source(here("utility/plot_calendar_perf.R"))
+source(here("utility/plot_calendar_analog.R"))
+source(here("key_plots/chart_regime_rel_overlay.R"))   # plot_regime_overlay_ext()
+
+# ── Pair analysis helpers ──────────────────────────────────────────────────────
+T_yrs <- as.numeric(diff(range(index(xts_ret)))) / 365
+
+magdon_mdd <- function(sigma, mu, T) {
+  if (mu <= 0) return(sigma * sqrt(T))
+  S <- mu / sigma
+  (sigma / S) * (log(S * sqrt(T)) + 0.35)
+}
+
+pair_stats <- function(out) {
+  s  <- out$stats
+  sp <- s %>% filter(str_detect(Series, "\u2212"))
+  mu  <- parse_number(sp$`Ann Return`) / 100
+  sig <- parse_number(sp$`Ann Vol`)    / 100
+  mdd <- parse_number(sp$`Max DD`)     / 100
+  list(
+    mu         = mu,    sig      = sig,   mdd    = mdd,
+    ir         = out$full_ir,             rho    = out$full_cor,
+    te_10pct   = 0.10 * sig,
+    mdd_10pct  = 0.10 * abs(mdd),
+    ret_10pct  = 0.10 * mu,
+    mdd_theory = magdon_mdd(sig, mu, T_yrs),
+    stats      = s
+  )
+}
+
+pairs_list <- list(
+  # ── KF2 winners (ρ > 0.75, positive IR) ──────────────────────────────────
+  list(t1="XLK", t2="SPY", label="XLK vs SPY", type="Equity swap",
+       decision="+10% XLK / \u221210% SPY"),
+  list(t1="SMH", t2="SPY", label="SMH vs SPY", type="Equity swap",
+       decision="+10% SMH / \u221210% SPY"),
+  list(t1="QQQ", t2="SPY", label="QQQ vs SPY", type="Equity swap",
+       decision="+10% QQQ / \u221210% SPY"),
+  # ── Additional equity swaps ───────────────────────────────────────────────
+  list(t1="XLV", t2="SPY", label="XLV vs SPY", type="Equity swap",
+       decision="+10% XLV / \u221210% SPY"),
+  list(t1="XLF", t2="SPY", label="XLF vs SPY", type="Equity swap",
+       decision="+10% XLF / \u221210% SPY"),
+  # ── Cross-asset additions ─────────────────────────────────────────────────
+  list(t1="XLP", t2="AGG", label="XLP vs AGG", type="Cross-asset",
+       decision="+10% XLP / \u221210% AGG"),
+  list(t1="XLV", t2="AGG", label="XLV vs AGG", type="Cross-asset",
+       decision="+10% XLV / \u221210% AGG")
+)
+
+# ── Shared constants ──────────────────────────────────────────────────────────
+MASTER   <- "SPY"
+T_FALL   <- 0.10
+spy_ret  <- xts_ret[, MASTER]
+rt       <- build_regime_table(spy_ret, T_FALL)
+
+REGIME_PAL <- c(Fall = "#D90429", Recovery = "#F77F00", Consolidation = "#2D6A4F")
+
+core_universe <- c(
+  "AGG", "IEF", "TLT", "HYG", "TIP",
+  "IEFA", "FEZ", "VWO",
+  "QQQ", "XLK", "XLF", "XLI", "XLE",
+  "GLD", "VIXY"
+)
+
+safe_haven_tickers <- c("GLD", "IEF", "TLT", "HYG", "XLF", "XLK")
+
+# ── Pre-compute exante (full sample only for speed) ───────────────────────────
+exante_tbl <- build_exante_metrics(
+  xts_ret  = xts_ret,
+  bmk      = MASTER,
+  horizons = "full",
+  w_blend  = 0.5
+)
+exante_tbl <- enrich_with_metadata(exante_tbl, etf_metadata)
+
+# ── L/S portfolio (core universe) ─────────────────────────────────────────────
+ls_core <- build_ls_portfolio(
+  xts_rel          = xts_rel,
+  n_long           = 5L,
+  n_short          = 5L,
+  signal_lookback  = 63L,
+  rebalance_freq   = "months",
+  universe_tickers = core_universe
+)
+
+core_5050 <- calc_saa_portfolio(
+  xts_returns    = xts_ret,
+  weights_vector = c(SPY = 0.50, AGG = 0.50),
+  rebalance_freq = "months"
+)
+
+common_idx   <- intersect(index(core_5050$returns), index(ls_core$returns))
+core_ret     <- core_5050$returns[common_idx]
+ls_ret       <- ls_core$returns[common_idx]
+combined_ret <- xts(as.numeric(core_ret) + as.numeric(ls_ret), order.by = common_idx)
+colnames(core_ret)     <- "Core_5050"
+colnames(ls_ret)       <- "LS_Core_15"
+colnames(combined_ret) <- "Core_plus_LS"
+phase2_comp  <- merge(core_ret, ls_ret, combined_ret)
+```
+
+---
+
+## The Intellectual Journey
+
+All analyses in this project orbit a single practical question:
+
+> **Given SPY as a starting point, how does any additional position change
+> the investor's experience — measured in return gained and drawdown suffered?**
+
+The journey moved through seven connected steps:
+
+| # | Analysis | Core Question |
+|---|---|---|
+| 1 | **SPY Regime Engine** | What are the distinct phases of SPY itself? |
+| 2 | **200DMA State Machine** | Can we signal tactical entry/exit on SPY? |
+| 3 | **Alpha by Regime** | How do other ETFs behave relative to SPY in each phase? |
+| 4 | **Safe Haven Signals** | Can we predict regime transitions before they happen? |
+| 5 | **Pair Analysis** | What is the cost-benefit of adding any ticker to SPY? (XLK deep-dive included) |
+| 6 | **L/S Overlay** | Can we extract pure alpha from the relative-return universe? |
+| 7 | **Exante Hypothesis** | Can we systematically classify every ticker as Enhancer or Stabilizer? |
+| 8 | **SAA Portfolio & Institutional Mapping** | How does a concrete SAA translate to ETFs and institutional risk profiles? |
+| 9 | **Meta-Asset Engine** | Can two sector ETFs be combined into a regime-balanced building block? |
+| 10 | **ETF Range Monitor** | Where does each ticker sit in its 52-week range right now? |
+
+The **unifying thread**: a recurrent empirical finding — confirmed across multiple
+analyses — that **correlation ≈ 1 beats correlation ≈ 0 on drawdown cost**.
+The diversification dogma (lower correlation → better protection) does not hold
+for MaxDD in a long-only blended portfolio. This discovery shapes everything from
+the L/S construction to the Exante framework.
+
+---
+
+## 1 · SPY Regime Engine
+
+<div class="insight-box">
+**What:** A 3-state data-driven engine labels every trading day as Fall (≥10% DD),
+Recovery (climb from trough), or Consolidation (expansion). No manual labels. Single
+parameter: `t_fall = 10%`.
+</div>
+
+```{r p1-regime-overlay, fig.height=7}
+print(plot_regime_overlay(spy_ret, asset_name = "SPY"))
+```
+
+<div style="page-break-inside: avoid">
+<div class="insight-box">
+**What:** The same 3-state engine run at a finer **≥5% DD** threshold (bottom bar) alongside
+the macro ≥10% bar (top bar). The jitter bar reveals mini-cycles *within* the macro regimes —
+corrections and recoveries that never reached 10% and were therefore invisible above.
+Comparing the two bars shows how much internal volatility is hidden inside a single
+Consolidation or Recovery label.
+</div>
+
+```{r p1-regime-overlay-jitter, fig.height=8}
+print(plot_regime_overlay(spy_ret, t_fall = 0.10, t_fall_jitter = 0.05))
+```
+</div>
+
+```{r p1-sm-diagram, fig.height=7}
+print(plot_sm_diagram(xts_ret, master = "SPY", t_fall = T_FALL))
+```
+
+```{r p1-regime-stats, fig.height=5}
+print(plot_regime_stats(spy_ret, asset_name = "SPY"))
+```
+
+<div class="finding-box">
+**Key finding:** The three states have radically different annualised return and
+duration profiles. Fall periods are short but violent; Recovery periods capture
+most of the rebound but carry elevated volatility; Consolidation is where the
+majority of calendar time — and compounded wealth — accumulates.
+Knowing *which state you are in* changes every allocation decision.
+</div>
+
+<small>Full report: `Rmd/spy_regime_statemachine_report.Rmd`</small>
+
+---
+
+## 2 · 200DMA State Machine
+
+<div class="insight-box">
+**What:** A hysteresis-based state machine on the 200-day moving average.
+Unlike a simple crossover, it requires price to clear the 200DMA by **+4%** to
+enter Bull and drop **−2%** below to enter Bear — preventing whipsawing in
+sideways markets.
+</div>
+
+```{r p2-200dma, fig.height=8}
+# xts_wlth is the RELATIVE wealth index (SPY vs SPY = flat 1.0) — not useful here.
+# Build SPY absolute wealth index from xts_ret for the 200DMA engine.
+spy_wlth_abs <- cumprod(1 + xts_ret[, "SPY"])
+colnames(spy_wlth_abs) <- "SPY"
+
+plot_200DMA(
+  ticker_symbol = "SPY",
+  xts_wealth    = spy_wlth_abs,   # absolute price wealth, base 1.0
+  xts_price     = xts_ret[, "SPY", drop = FALSE],  # daily returns for DD panel
+  upper         = 0.04,
+  lower         = -0.02
+)
+```
+
+<div class="finding-box">
+**Key finding:** The asymmetric thresholds (+4% / −2%) materially reduce false
+signals vs a symmetric crossover. The Bull/Bear state machine aligns well with
+the Fall/Consolidation classification from the regime engine — but reacts faster
+on the upside entry and more cautiously on the downside exit.
+</div>
+
+<small>Full report: `Rmd/spy_regime_statemachine_report.Rmd` (§ State Machine)</small>
+
+---
+
+## 3 · Alpha by Regime
+
+<div class="insight-box">
+**What:** For a set of representative ETFs, compute the average relative return
+(α vs SPY) within each regime state. This answers: *which tickers are regime-aware —
+i.e., they protect in Fall and participate in Consolidation?*
+</div>
+
+```{r p3-regime-rel-summary, fig.height=7}
+print(plot_regime_rel_summary(
+  xts_ret = xts_ret,
+  tickers = safe_haven_tickers,
+  master  = "SPY"
+))
+```
+
+```{r p3-regime-heatmap, fig.height=7}
+print(plot_regime_rel_heatmap(
+  xts_ret = xts_ret,
+  tickers = safe_haven_tickers,
+  master  = "SPY"
+))
+```
+
+```{r p3-abs-vs-rel, fig.height=5.5}
+# Compute avg abs return AND avg alpha per ticker per regime TYPE
+# to show the abs vs relative distinction explicitly
+sh_tickers_all <- c("SPY", safe_haven_tickers)
+
+abs_rel_df <- map_dfr(sh_tickers_all, function(tk) {
+  tk_r <- xts_ret[, tk]
+  rt %>% rowwise() %>%
+    mutate(
+      ticker  = tk,
+      abs_ret = {
+        w <- tk_r[paste0(xmin, "/", xmax)]
+        if (length(w) == 0) NA_real_
+        else as.numeric(Return.cumulative(w))
+      },
+      spy_abs = period_return,
+      alpha   = abs_ret - spy_abs
+    ) %>%
+    ungroup() %>%
+    select(ticker, regime, abs_ret, alpha)
+}) %>%
+  mutate(regime = as.character(regime)) %>%
+  group_by(ticker, regime) %>%
+  summarise(
+    avg_abs   = mean(abs_ret, na.rm = TRUE),
+    avg_alpha = mean(alpha,   na.rm = TRUE),
+    .groups   = "drop"
+  ) %>%
+  pivot_longer(c(avg_abs, avg_alpha),
+               names_to  = "metric",
+               values_to = "value") %>%
+  mutate(
+    metric = if_else(metric == "avg_abs", "Abs Return", "α vs SPY"),
+    regime = factor(regime, levels = c("Fall", "Recovery", "Consolidation")),
+    ticker = factor(ticker, levels = sh_tickers_all),
+    bar_col = case_when(
+      metric == "α vs SPY" & value >= 0  ~ "#1B3A6B",
+      metric == "α vs SPY" & value <  0  ~ "#7B1010",
+      metric == "Abs Return" & value >= 0 ~ "#5B8DB8",
+      TRUE                                ~ "#C97070"
+    )
+  )
+
+ggplot(abs_rel_df, aes(x = ticker, y = value, fill = bar_col)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.65,
+           show.legend = FALSE) +
+  geom_hline(yintercept = 0, linewidth = 0.6, color = "grey40") +
+  geom_text(aes(
+    label = sprintf("%s%.1f%%", if_else(value >= 0, "+", ""), value * 100),
+    vjust = if_else(value >= 0, -0.35, 1.25),
+    color = bar_col),
+    position = position_dodge(width = 0.7),
+    size = 2.8, fontface = "bold", show.legend = FALSE) +
+  scale_fill_identity() +
+  scale_color_identity() +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  facet_wrap(~regime, nrow = 1) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_blank(),
+    strip.text  = element_text(face = "bold", size = 11),
+    axis.title  = element_blank(),
+    axis.text.x = element_text(face = "bold", size = 9, angle = 30, hjust = 1),
+    plot.title    = element_text(face = "bold", size = 13),
+    plot.subtitle = element_text(color = "grey45", size = 9)
+  ) +
+  labs(
+    title    = "Abs Return vs α vs SPY — by Regime Type",
+    subtitle = "Dark = α vs SPY  |  Light = Abs return  |  Key: safe havens LAG in Recovery on alpha but abs return stays positive"
+  )
+```
+
+<div class="finding-box">
+**Key findings — Abs vs Relative performance distinction:**
+
+**(1) Safe havens (GLD, IEF) do NOT give back absolute performance in Recovery —
+they give back *relative* performance.**
+In Fall, they record a STABLE outperformance: small absolute loss while SPY suffers a large fall
+(e.g. GLD −4.6% abs / +24.4% α in Fall Sep 2018 while SPY fell ~−29%).
+In Recovery, SPY rebounds violently. GLD and IEF often have *positive* absolute returns
+but lag the SPY rebound — generating negative alpha (LAG type). This is an
+opportunity cost, not an actual loss.
+
+**(2) The alpha asymmetry favours holding safe havens across the cycle.**
+Fall alpha protection (STABLE: large positive α) typically exceeds Recovery lag (LAG: negative α)
+in magnitude because Fall episodes are short and violent while recoveries are gradual.
+The net alpha across a complete Fall → Recovery cycle can remain positive for GLD and IEF.
+
+**(3) Equity satellites (XLK, XLF) are the mirror image.**
+They show ALPHA or MOMENTUM type in Recovery/Consolidation (positive α, both positive abs)
+but LOSS or EXPOSED in Fall (negative α, both negative abs — deeper drawdown than SPY).
+
+**(4) The correct framing for allocation:**
+Holding GLD/IEF does not cost you absolute return in Recovery — it costs you
+*relative* return vs SPY. For a risk-aware investor, this is the intended trade-off:
+accept the LAG tax in good times to avoid the LOSS amplification in bad times.
+</div>
+
+```{r p3-abs-alpha-sectors, fig.height=5}
+print(plot_abs_alpha_regime(
+  xts_ret = xts_ret,
+  tickers = intersect(g_sector_tickers, colnames(xts_ret)),
+  rt      = rt,
+  title   = "US Sectors \u2014 Avg Abs Return vs \u03b1 vs SPY by Regime"
+))
+```
+
+```{r p3-fall-fingerprint, fig.height=7}
+print(plot_fall_fingerprint(
+  xts_ret = xts_ret,
+  tickers = intersect(g_sector_tickers, colnames(xts_ret)),
+  rt      = rt,
+  title   = "US Sectors \u2014 Fall Fingerprint (\u03b1 vs SPY per Episode)"
+))
+```
+
+```{r p3-sector-fingerprint, fig.height=7}
+print(plot_regime_fingerprint(
+  xts_ret = xts_ret,
+  tickers = intersect(g_sector_tickers, colnames(xts_ret)),
+  rt      = rt,
+  title   = "US Sectors \u2014 Full Cycle Fingerprint (Strip)"
+))
+```
+
+```{r p3-sector-fingerprint-box, fig.height=7}
+print(plot_regime_fingerprint_box(
+  xts_ret = xts_ret,
+  tickers = intersect(g_sector_tickers, colnames(xts_ret)),
+  rt      = rt,
+  title   = "US Sectors \u2014 Full Cycle Fingerprint (Boxplot)"
+))
+```
+
+```{r p3-regime-sync, fig.height=6}
+print(plot_regime_sync(
+  xts_ret = xts_ret,
+  tickers = intersect(g_sector_tickers, colnames(xts_ret)),
+  title   = "US Sectors \u2014 Regime Sync (each ticker\u2019s own cycle)"
+))
+```
+
+<small>Full report: `Rmd/spy_regime_statemachine_report.Rmd` (§ Relative Overlay)</small>
+
+---
+
+## 4 · Safe Haven Regime Signal
+
+<div class="insight-box">
+**What:** Three methods for predicting SPY regime transitions using leading indicators
+(Credit spread via HYG, rates via IEF/TLT, FX safe havens).<br>
+**Method 1:** Rolling correlation breakdown between safe haven basket and SPY.<br>
+**Method 2:** LASSO logistic regression on lagged features.<br>
+**Method 3:** Regime-difference eigenanalysis (PCA on Fall-minus-Consolidation covariance).
+</div>
+
+```{r p4-rolling-corr, fig.height=7}
+# Rolling correlation of HYG and IEF to SPY — the simplest leading signal
+roll_win <- 60L
+tickers_sh <- c("HYG", "IEF", "GLD")
+
+corr_df <- map_dfr(tickers_sh, function(tk) {
+  r <- na.omit(merge(xts_ret[, "SPY"], xts_ret[, tk]))
+  rc <- rollapply(r, width = roll_win,
+                  FUN = function(m) cor(m[,1], m[,2], use = "complete.obs"),
+                  by.column = FALSE, fill = NA, align = "right")
+  data.frame(date = index(rc), corr = as.numeric(rc), ticker = tk)
+})
+
+regime_shading <- rt %>%
+  filter(regime != "Consolidation") %>%
+  mutate(xmin = as.Date(xmin), xmax = as.Date(xmax))
+
+ggplot(corr_df, aes(x = date, y = corr, colour = ticker)) +
+  geom_rect(data = regime_shading,
+            aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf, fill = regime),
+            inherit.aes = FALSE, alpha = 0.15) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line(linewidth = 0.8) +
+  scale_fill_manual(values = REGIME_PAL, name = "Regime") +
+  scale_colour_manual(values = c(HYG = "#E63946", IEF = "#2980b9", GLD = "#f39c12"),
+                      name = NULL) +
+  scale_x_date(date_breaks = "6 months", date_labels = "%b %Y") +
+  scale_y_continuous(limits = c(-1, 1)) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+  labs(
+    title    = "Method 1 — Rolling 60-Day Correlation to SPY",
+    subtitle = "HYG (Credit) · IEF (Rates) · GLD (Gold) | Shaded = Fall & Recovery periods",
+    x = NULL, y = "Rolling Correlation to SPY"
+  )
+```
+
+<div class="finding-box">
+**Key finding:** HYG (high-yield credit) correlation to SPY *rises* ahead of Fall
+periods — a counter-intuitive early warning: when credit is becoming *more* SPY-like,
+stress is building. GLD correlation consistently decouples during Fall. These
+dynamics motivated a predictive LASSO model with AUC ~0.72 at a 63-day horizon.
+</div>
+
+<small>Full report: `Rmd/safe_haven_regime_report.Rmd`</small>
+
+---
+
+```{r run-pairs, include=FALSE}
+# Explicit capture of rt to avoid stats::rt() shadowing inside map() closure
+.rt <- rt
+pair_results <- map(pairs_list, function(p) {
+  out <- plot_xts_pair(
+    xts_ret[, p$t1], xts_ret[, p$t2],
+    label1     = p$t1, label2 = p$t2,
+    regime_tbl = .rt
+  )
+  c(p, list(out = out, ps = pair_stats(out)))
+})
+```
+
+```{r build-kf-data, include=FALSE}
+# ── KF shared parameters ───────────────────────────────────────────────────────
+RHO_SCREEN <- 0.75
+MDD_SCREEN <- -0.30
+T_yrs_kf   <- as.numeric(diff(range(index(xts_ret)))) / 365
+universe_kf <- setdiff(colnames(xts_ret), "SPY")
+
+RHO_PAL <- c(
+  "ρ < 0.2"  = "#d73027",
+  "0.2–0.5"  = "#fc8d59",
+  "0.5–0.75" = "#4575b4",
+  "ρ > 0.75" = "#1a1a6e"
+)
+
+QUAD_PAL <- c(
+  "Best: +IR, +ΔDD"    = "#1a1a6e",
+  "Return edge only"   = "#2196F3",
+  "DD protection only" = "#27ae60",
+  "Neither"            = "#bdbdbd"
+)
+
+# Magdon-Ismail with full edge-case guards
+magdon_mdd_kf <- function(sigma, mu, T) {
+  if (is.na(mu) || is.na(sigma) || sigma <= 0) return(NA_real_)
+  if (mu <= 0) return(sigma * sqrt(T))
+  S <- mu / sigma
+  log_term <- log(S * sqrt(T)) + 0.35
+  if (log_term <= 0) return(sigma * sqrt(T))
+  max((sigma / S) * log_term, 0)
+}
+
+# ── KF1: cb_tbl_kf — all tickers vs SPY, theory vs empirical MaxDD ────────────
+cb_tbl_kf <- map_dfr(universe_kf, function(tk) {
+  r_tk  <- as.numeric(na.omit(xts_ret[, tk]))
+  r_spy <- as.numeric(na.omit(xts_ret[, "SPY"]))
+  n     <- min(length(r_tk), length(r_spy))
+  if (n < 252) return(NULL)
+  r_tk  <- tail(r_tk,  n)
+  r_spy <- tail(r_spy, n)
+
+  spread  <- r_tk - r_spy
+  mu_spr  <- mean(spread, na.rm = TRUE) * 252
+  sig_spr <- sd(spread,   na.rm = TRUE) * sqrt(252)
+  mdd_emp <- { w <- cumprod(1 + spread); min((w - cummax(w)) / cummax(w), na.rm = TRUE) }
+  mdd_th  <- magdon_mdd_kf(sig_spr, mu_spr, T_yrs_kf)
+  rho     <- cor(r_tk, r_spy, use = "complete.obs")
+
+  tibble(
+    ticker  = tk,
+    mu_spr  = mu_spr,
+    sig_spr = sig_spr,
+    mdd_emp = mdd_emp,
+    mdd_th  = -mdd_th,
+    rho     = rho,
+    ir      = mu_spr / sig_spr
+  )
+}) %>%
+  left_join(etf_metadata %>% dplyr::select(ticker, asset_class, sub_block),
+            by = "ticker") %>%
+  filter(!is.na(mdd_th)) %>%
+  mutate(
+    residual = mdd_emp - mdd_th,
+    rho_band = cut(rho,
+      breaks = c(-Inf, 0.2, 0.5, 0.75, Inf),
+      labels = c("ρ < 0.2", "0.2–0.5", "0.5–0.75", "ρ > 0.75")
+    )
+  )
+
+# ── KF2: spread_tbl_kf — ρ, IR, spread-MaxDD, DD-delta, prob_1q ───────────────
+spread_tbl_kf <- map_dfr(universe_kf, function(tk) {
+  r_tk  <- as.numeric(na.omit(xts_ret[, tk]))
+  r_spy <- as.numeric(na.omit(xts_ret[, "SPY"]))
+  n     <- min(length(r_tk), length(r_spy))
+  if (n < 252) return(NULL)
+  r_tk  <- tail(r_tk,  n)
+  r_spy <- tail(r_spy, n)
+
+  spread    <- r_tk - r_spy
+  mu_spr    <- mean(spread, na.rm = TRUE) * 252
+  sig_spr   <- sd(spread,   na.rm = TRUE) * sqrt(252)
+  mdd_spr   <- { w <- cumprod(1 + spread); min((w - cummax(w)) / cummax(w), na.rm = TRUE) }
+  rho       <- cor(r_tk, r_spy, use = "complete.obs")
+  blend     <- 0.90 * r_spy + 0.10 * r_tk
+  mdd_blend <- { w <- cumprod(1 + blend); min((w - cummax(w)) / cummax(w), na.rm = TRUE) }
+  mdd_spy   <- { w <- cumprod(1 + r_spy); min((w - cummax(w)) / cummax(w), na.rm = TRUE) }
+  roll_ret  <- zoo::rollapply(spread, 63L, function(x) prod(1 + x) - 1,
+                              fill = NA, align = "right")
+  prob_1q   <- mean(roll_ret > 0, na.rm = TRUE)
+
+  tibble(ticker = tk, rho = rho, mu_spr = mu_spr, sig_spr = sig_spr,
+         ir = mu_spr / sig_spr, mdd_spr = mdd_spr, mdd_blend = mdd_blend,
+         mdd_spy = mdd_spy, dd_delta = mdd_blend - mdd_spy, prob_1q = prob_1q)
+}) %>%
+  left_join(etf_metadata %>% dplyr::select(ticker, asset_class, sub_block),
+            by = "ticker") %>%
+  mutate(
+    passes_screen = rho >= RHO_SCREEN & mdd_spr >= MDD_SCREEN,
+    rho_band = cut(rho,
+      breaks = c(-Inf, 0.2, 0.5, 0.75, Inf),
+      labels = c("ρ < 0.2", "0.2–0.5", "0.5–0.75", "ρ > 0.75")
+    )
+  )
+```
+
+```{r build-frontier-data, include=FALSE}
+library(quadprog)
+
+RF_EF      <- 0.045
+N_POINTS   <- 80
+
+# Filter to tickers with >= 252 obs; align to common date range
+ef_tickers <- intersect(
+  names(which(colSums(!is.na(xts_ret)) >= 252)),
+  etf_metadata$ticker
+)
+ret_clean_ef <- na.omit(xts_ret[, ef_tickers])
+mu_ef    <- colMeans(ret_clean_ef) * 252
+Sigma_ef <- cov(ret_clean_ef) * 252
+n_ef     <- ncol(ret_clean_ef)
+
+# Long-only, fully-invested QP solver
+min_var_pf <- function(target, mu, Sigma) {
+  n    <- length(mu)
+  Amat <- cbind(rep(1, n), mu, diag(n))
+  bvec <- c(1, target, rep(0, n))
+  tryCatch({
+    sol <- solve.QP(2 * Sigma, rep(0, n), Amat, bvec, meq = 2)
+    list(weights = sol$solution, var = sol$value)
+  }, error = function(e) NULL)
+}
+
+gmv_ret_ef <- optimize(
+  function(r) { res <- min_var_pf(r, mu_ef, Sigma_ef); if (is.null(res)) Inf else res$var },
+  interval = c(min(mu_ef), max(mu_ef)), tol = 1e-6
+)$minimum
+
+ret_targets_ef <- seq(gmv_ret_ef, quantile(mu_ef, 0.95), length.out = N_POINTS)
+
+frontier_pts_ef <- map_dfr(ret_targets_ef, function(tgt) {
+  res <- min_var_pf(tgt, mu_ef, Sigma_ef)
+  if (is.null(res)) return(NULL)
+  tibble(ret = tgt, vol = sqrt(res$var), sharpe = (tgt - RF_EF) / sqrt(res$var))
+})
+
+gmv_res_ef  <- min_var_pf(gmv_ret_ef, mu_ef, Sigma_ef)
+gmv_pt_ef   <- tibble(ret = gmv_ret_ef, vol = sqrt(gmv_res_ef$var),
+                      label = "GMV", sharpe = (gmv_ret_ef - RF_EF) / sqrt(gmv_res_ef$var))
+
+tan_idx_ef  <- which.max(frontier_pts_ef$sharpe)
+tan_pt_ef   <- frontier_pts_ef[tan_idx_ef, ] %>% mutate(label = "Max Sharpe")
+
+saa_tk_ef   <- SAA_PORTFOLIO$ticker
+saa_w_ef    <- SAA_PORTFOLIO$weight
+saa_mu_ef   <- sum(saa_w_ef * mu_ef[saa_tk_ef])
+saa_var_ef  <- as.numeric(t(saa_w_ef) %*% Sigma_ef[saa_tk_ef, saa_tk_ef] %*% saa_w_ef)
+saa_pt_ef   <- tibble(ret = saa_mu_ef, vol = sqrt(saa_var_ef), label = "SAA",
+                      sharpe = (saa_mu_ef - RF_EF) / sqrt(saa_var_ef))
+
+# ticker scatter with plot_class grouping
+us_broad_sb_ef  <- c("US_Broad","US_LargeCap","US_SmallCap","US_MidCap",
+                      "Momentum","MinVol","Quality","DivGrowth","CashFlow","Eq_Income","Value")
+us_sector_sb_ef <- c("Energy","Financials","HealthCare","HC_Broad","MedDevices","Biotech",
+                      "Industrials","Materials","Discretionary","Comms","Housing",
+                      "Reg_Banks","REIT_Sector","Defense")
+intl_dm_sb_ef   <- c("DM_Broad","Europe","Germany","France","Italy","Australia",
+                      "Canada","Japan","Japan_Hdg","Korea","Switzerland")
+em_sb_ef        <- c("EM_Broad","China","India","Brazil")
+thematic_sb_ef  <- c("Semis","AI","Cloud","Cyber","IPO","Private_Eq",
+                      "MinVol_Glbl","Agri_Equity","Lithium","Uranium")
+
+ticker_pts_ef <- tibble(
+  ticker = ef_tickers,
+  ret    = mu_ef,
+  vol    = sqrt(diag(Sigma_ef)),
+  sharpe = (mu_ef - RF_EF) / sqrt(diag(Sigma_ef))
+) %>%
+  left_join(etf_metadata %>% dplyr::select(ticker, asset_class, sub_block), by = "ticker") %>%
+  mutate(
+    in_saa     = ticker %in% SAA_PORTFOLIO$ticker,
+    plot_class = case_when(
+      asset_class == "Equity" & sub_block %in% us_broad_sb_ef  ~ "Eq · US Broad/Factor",
+      asset_class == "Equity" & sub_block %in% us_sector_sb_ef ~ "Eq · US Sector",
+      asset_class == "Equity" & sub_block %in% intl_dm_sb_ef   ~ "Eq · Intl DM",
+      asset_class == "Equity" & sub_block %in% em_sb_ef        ~ "Eq · EM",
+      asset_class == "Equity" & sub_block %in% thematic_sb_ef  ~ "Eq · Thematic",
+      asset_class == "Equity"                                   ~ "Eq · Other",
+      asset_class == "FixedIncome"  ~ "Fixed Income",
+      asset_class == "Commodity"    ~ "Commodity",
+      asset_class == "FX"           ~ "FX",
+      asset_class == "RealAsset"    ~ "Real Asset",
+      asset_class == "MultiAsset"   ~ "Multi-Asset",
+      TRUE                          ~ asset_class
+    )
+  )
+
+AC_PAL_EF <- c(
+  "Eq · US Broad/Factor" = "#1B3A6B",
+  "Eq · US Sector"       = "#4A90D9",
+  "Eq · Intl DM"         = "#7EB8E8",
+  "Eq · EM"              = "#00897B",
+  "Eq · Thematic"        = "#AB47BC",
+  "Eq · Other"           = "#90A4AE",
+  "Fixed Income"         = "#27AE60",
+  "Commodity"            = "#E67E22",
+  "FX"                   = "#C9A800",
+  "Real Asset"           = "#C0392B",
+  "Multi-Asset"          = "#7F8C8D",
+  "Alternative"          = "#BDC3C7",
+  "Signal"               = "#BDC3C7"
+)
+
+p_ef <- ggplot() +
+  geom_point(
+    data = ticker_pts_ef,
+    aes(x = vol, y = ret, colour = plot_class, shape = in_saa, size = in_saa),
+    alpha = 0.70
+  ) +
+  geom_text_repel(
+    data = ticker_pts_ef %>% filter(in_saa | sharpe > 0.8 | ret > 0.20 | vol < 0.08),
+    aes(x = vol, y = ret, label = ticker, colour = plot_class),
+    size = 3, fontface = "bold", max.overlaps = 25,
+    segment.color = "grey70", show.legend = FALSE
+  ) +
+  geom_path(data = frontier_pts_ef, aes(x = vol, y = ret),
+            colour = "#2c3e50", linewidth = 1.2, alpha = 0.9) +
+  geom_point(data = gmv_pt_ef, aes(x = vol, y = ret),
+             shape = 23, fill = "#27ae60", colour = "white", size = 5, stroke = 1.5) +
+  geom_label(data = gmv_pt_ef, aes(x = vol, y = ret, label = "GMV"),
+             nudge_y = 0.008, size = 3.5, fontface = "bold",
+             fill = "#27ae60", colour = "white", label.size = 0) +
+  geom_point(data = tan_pt_ef, aes(x = vol, y = ret),
+             shape = 24, fill = "#e67e22", colour = "white", size = 5, stroke = 1.5) +
+  geom_label(data = tan_pt_ef, aes(x = vol, y = ret, label = "Max Sharpe"),
+             nudge_y = 0.008, size = 3.5, fontface = "bold",
+             fill = "#e67e22", colour = "white", label.size = 0) +
+  geom_point(data = saa_pt_ef, aes(x = vol, y = ret),
+             shape = 21, fill = "#D90429", colour = "white", size = 6, stroke = 1.5) +
+  geom_label(data = saa_pt_ef, aes(x = vol, y = ret, label = "SAA"),
+             nudge_x = 0.018, nudge_y = 0.012, size = 3.5, fontface = "bold",
+             fill = "#D90429", colour = "white", label.size = 0) +
+  scale_colour_manual(values = AC_PAL_EF, name = "Asset Class / Group", na.value = "grey70") +
+  scale_shape_manual(values = c("TRUE" = 18, "FALSE" = 16), guide = "none") +
+  scale_size_manual(values  = c("TRUE" = 3.5, "FALSE" = 1.8), guide = "none") +
+  scale_x_continuous(labels = percent_format(accuracy = 1), name = "Annualised Volatility") +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(-0.05, 0.30),
+                     name = "Annualised Return") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.minor  = element_blank(),
+    legend.position   = "right",
+    legend.text       = element_text(size = 10),
+    legend.title      = element_text(size = 10, face = "bold"),
+    axis.title        = element_text(size = 12),
+    axis.text         = element_text(size = 11),
+    plot.title        = element_text(face = "bold", size = 15),
+    plot.subtitle     = element_text(size = 11, colour = "grey40"),
+    plot.caption      = element_text(size = 9, colour = "grey55")
+  ) +
+  labs(
+    title    = "Efficient Frontier — Sovereign Universe",
+    subtitle = sprintf(
+      "Long-only, fully-invested | %d tickers | RF = %.1f%% | SAA = current strategic allocation",
+      n_ef, RF_EF * 100
+    ),
+    caption  = sprintf(
+      "GMV: vol=%.1f%% ret=%.1f%% Sharpe=%.2f  |  Max Sharpe: vol=%.1f%% ret=%.1f%% Sharpe=%.2f  |  SAA: vol=%.1f%% ret=%.1f%% Sharpe=%.2f",
+      gmv_pt_ef$vol*100, gmv_pt_ef$ret*100, gmv_pt_ef$sharpe,
+      tan_pt_ef$vol*100, tan_pt_ef$ret*100, tan_pt_ef$sharpe,
+      saa_pt_ef$vol*100, saa_pt_ef$ret*100, saa_pt_ef$sharpe
+    )
+  )
+
+# Weights tables
+ef_gmv_tbl <- tibble(ticker = ef_tickers, weight = gmv_res_ef$weights) %>%
+  filter(weight > 0.005) %>% arrange(desc(weight)) %>%
+  left_join(etf_metadata %>% dplyr::select(ticker, asset_class), by = "ticker") %>%
+  mutate(Weight = percent(weight, accuracy = 0.1)) %>%
+  dplyr::select(Ticker = ticker, `Asset Class` = asset_class, Weight)
+
+ef_tan_res  <- min_var_pf(frontier_pts_ef$ret[tan_idx_ef], mu_ef, Sigma_ef)
+ef_tan_tbl  <- tibble(ticker = ef_tickers, weight = ef_tan_res$weights) %>%
+  filter(weight > 0.005) %>% arrange(desc(weight)) %>%
+  left_join(etf_metadata %>% dplyr::select(ticker, asset_class), by = "ticker") %>%
+  mutate(Weight = percent(weight, accuracy = 0.1)) %>%
+  dplyr::select(Ticker = ticker, `Asset Class` = asset_class, Weight)
+```
+
+```{r build-meta-asset-data, include=FALSE}
+library(quadprog)
+
+RF_MA   <- 0.045
+WEIGHT_GRID_MA <- seq(0.10, 0.90, by = 0.10)
+
+SECTOR_TICKERS_MA <- c("XLK","XLC","XLV","XLF","XLI",
+                        "XLP","XLY","XLE","XLB","XLRE",
+                        "XLU","VHT","ITA","ITB","KRE")
+
+# ── Per-regime alpha helper ───────────────────────────────────────────────────
+regime_alphas_ma <- function(ret_series, spy_ret, rt) {
+  map_dfr(seq_len(nrow(rt)), function(i) {
+    ep  <- rt[i, ]
+    idx <- paste0(ep$xmin, "/", ep$xmax)
+    r_tk <- ret_series[idx]; r_sp <- spy_ret[idx]
+    if (length(r_tk) < 5) return(NULL)
+    tibble(
+      regime = as.character(ep$regime),
+      alpha  = as.numeric(Return.cumulative(r_tk)) -
+               as.numeric(Return.cumulative(r_sp))
+    )
+  }) %>%
+    group_by(regime) %>%
+    summarise(avg_alpha = mean(alpha, na.rm = TRUE), .groups = "drop")
+}
+
+max_dd_ma <- function(r) { w <- cumprod(1+r); min((w-cummax(w))/cummax(w), na.rm=TRUE) }
+
+spy_vec_ma  <- as.numeric(na.omit(xts_ret[, "SPY"]))
+spy_mdd_ma  <- max_dd_ma(spy_vec_ma)
+spy_mu_ma   <- mean(spy_vec_ma) * 252
+spy_sig_ma  <- sd(spy_vec_ma) * sqrt(252)
+spy_sharpe_ma <- (spy_mu_ma - RF_MA) / spy_sig_ma
+
+# Pre-compute per-ticker regime alphas
+ticker_ra_ma <- map(SECTOR_TICKERS_MA, function(tk)
+  regime_alphas_ma(xts_ret[, tk], spy_ret, rt)
+) %>% setNames(SECTOR_TICKERS_MA)
+
+# Score all pairs at all weights
+pairs_raw_ma <- combn(SECTOR_TICKERS_MA, 2, simplify = FALSE)
+
+score_tbl_ma <- map_dfr(pairs_raw_ma, function(pair) {
+  tk1 <- pair[1]; tk2 <- pair[2]
+  r1 <- as.numeric(na.omit(xts_ret[, tk1]))
+  r2 <- as.numeric(na.omit(xts_ret[, tk2]))
+  rs <- as.numeric(na.omit(spy_ret))
+  n  <- min(length(r1), length(r2), length(rs))
+  r1 <- tail(r1,n); r2 <- tail(r2,n); rs <- tail(rs,n)
+
+  a1 <- ticker_ra_ma[[tk1]]; a2 <- ticker_ra_ma[[tk2]]
+  alpha_both  <- inner_join(a1, a2, by="regime", suffix=c("_1","_2"))
+  regime_corr <- if (nrow(alpha_both)>=2) cor(alpha_both$avg_alpha_1, alpha_both$avg_alpha_2) else NA_real_
+
+  map_dfr(WEIGHT_GRID_MA, function(w) {
+    blend   <- w*r1 + (1-w)*r2
+    mu_b    <- mean(blend)*252; sig_b <- sd(blend)*sqrt(252)
+    mdd_b   <- max_dd_ma(blend)
+    sharpe_b <- (mu_b - RF_MA)/sig_b
+    bx      <- xts(blend, order.by=tail(index(spy_ret),n))
+    ba      <- regime_alphas_ma(bx, spy_ret, rt)
+    tibble(tk1=tk1, tk2=tk2, w1=w, w2=1-w,
+           sharpe_blend=sharpe_b, mdd_blend=mdd_b,
+           dd_delta=mdd_b-spy_mdd_ma, mu_blend=mu_b, sig_blend=sig_b,
+           regime_corr=regime_corr,
+           alpha_var=var(ba$avg_alpha, na.rm=TRUE),
+           fall_alpha=ba$avg_alpha[ba$regime=="Fall"] %||% NA_real_,
+           consol_alpha=ba$avg_alpha[ba$regime=="Consolidation"] %||% NA_real_)
+  })
+})
+
+`%||%` <- function(a, b) if (length(a)) a else b
+
+# Re-run with %||% defined
+score_tbl_ma <- map_dfr(pairs_raw_ma, function(pair) {
+  tk1 <- pair[1]; tk2 <- pair[2]
+  r1 <- as.numeric(na.omit(xts_ret[, tk1]))
+  r2 <- as.numeric(na.omit(xts_ret[, tk2]))
+  rs <- as.numeric(na.omit(spy_ret))
+  n  <- min(length(r1), length(r2), length(rs))
+  r1 <- tail(r1,n); r2 <- tail(r2,n)
+
+  a1 <- ticker_ra_ma[[tk1]]; a2 <- ticker_ra_ma[[tk2]]
+  alpha_both  <- inner_join(a1, a2, by="regime", suffix=c("_1","_2"))
+  regime_corr <- if (nrow(alpha_both)>=2) cor(alpha_both$avg_alpha_1, alpha_both$avg_alpha_2) else NA_real_
+
+  map_dfr(WEIGHT_GRID_MA, function(w) {
+    blend    <- w*r1 + (1-w)*r2
+    mu_b     <- mean(blend)*252; sig_b <- sd(blend)*sqrt(252)
+    mdd_b    <- max_dd_ma(blend); sharpe_b <- (mu_b-RF_MA)/sig_b
+    bx       <- xts(blend, order.by=tail(index(spy_ret),n))
+    ba       <- regime_alphas_ma(bx, spy_ret, rt)
+    fa       <- ba$avg_alpha[ba$regime=="Fall"]
+    ca       <- ba$avg_alpha[ba$regime=="Consolidation"]
+    tibble(tk1=tk1,tk2=tk2,w1=w,w2=1-w,
+           sharpe_blend=sharpe_b,mdd_blend=mdd_b,
+           dd_delta=mdd_b-spy_mdd_ma,mu_blend=mu_b,sig_blend=sig_b,
+           regime_corr=regime_corr,alpha_var=var(ba$avg_alpha,na.rm=TRUE),
+           fall_alpha   = if(length(fa)) fa else NA_real_,
+           consol_alpha = if(length(ca)) ca else NA_real_)
+  })
+})
+
+score_tbl_ma <- score_tbl_ma %>%
+  mutate(
+    z_sharpe = (sharpe_blend-min(sharpe_blend,na.rm=TRUE))/(max(sharpe_blend,na.rm=TRUE)-min(sharpe_blend,na.rm=TRUE)),
+    z_dd     = (dd_delta-min(dd_delta,na.rm=TRUE))/(max(dd_delta,na.rm=TRUE)-min(dd_delta,na.rm=TRUE)),
+    z_compl  = (-regime_corr-min(-regime_corr,na.rm=TRUE))/(max(-regime_corr,na.rm=TRUE)-min(-regime_corr,na.rm=TRUE)),
+    z_smooth = (-alpha_var-min(-alpha_var,na.rm=TRUE))/(max(-alpha_var,na.rm=TRUE)-min(-alpha_var,na.rm=TRUE)),
+    composite = 0.40*z_sharpe + 0.25*z_dd + 0.25*z_compl + 0.10*z_smooth
+  )
+
+best_pairs_ma <- score_tbl_ma %>%
+  group_by(tk1, tk2) %>%
+  slice_max(composite, n=1, with_ties=FALSE) %>%
+  ungroup() %>%
+  mutate(
+    pair_label   = paste0(tk1," + ",tk2),
+    weight_label = paste0(round(w1*100),"/",round(w2*100))
+  ) %>%
+  arrange(desc(composite))
+
+# ── Plot 1: Heatmap ───────────────────────────────────────────────────────────
+heatmap_df_ma <- best_pairs_ma %>%
+  dplyr::select(tk1, tk2, composite, weight_label) %>%
+  bind_rows(best_pairs_ma %>% rename(tk1=tk2, tk2=tk1)) %>%
+  mutate(tk1=factor(tk1,levels=SECTOR_TICKERS_MA),
+         tk2=factor(tk2,levels=SECTOR_TICKERS_MA))
+
+p_ma_heatmap <- ggplot(heatmap_df_ma, aes(x=tk1, y=tk2, fill=composite)) +
+  geom_tile(colour="white", linewidth=0.5) +
+  geom_text(aes(label=weight_label), size=2.6, colour="white", fontface="bold") +
+  scale_fill_gradient2(low="#d73027", mid="#ffffbf", high="#1a1a6e",
+                       midpoint=0.5, name="Composite\nScore", limits=c(0,1)) +
+  scale_x_discrete(position="top") +
+  theme_minimal(base_size=12) +
+  theme(axis.text.x=element_text(angle=45,hjust=0,face="bold",size=10),
+        axis.text.y=element_text(face="bold",size=10),
+        axis.title=element_blank(), panel.grid=element_blank(),
+        plot.title=element_text(face="bold",size=14),
+        plot.subtitle=element_text(size=10,colour="grey40")) +
+  labs(title="Meta-Asset Pair Scoring Heatmap — Sector ETF Universe",
+       subtitle="Colour = composite score | Cell label = optimal blend weight (w1/w2)")
+
+# ── Plot 2: Ranked bar ────────────────────────────────────────────────────────
+p_ma_ranked <- best_pairs_ma %>%
+  slice_head(n=20) %>%
+  mutate(pair_label=fct_reorder(paste0(tk1,"+",tk2,"\n(",weight_label,")"), composite)) %>%
+  ggplot(aes(x=pair_label, y=composite, fill=sharpe_blend > spy_sharpe_ma)) +
+  geom_col(alpha=0.85, width=0.7) +
+  geom_text(aes(label=sprintf("IR=%.2f", sharpe_blend)), hjust=-0.1, size=3, fontface="bold") +
+  coord_flip() +
+  scale_fill_manual(values=c("TRUE"="#1a1a6e","FALSE"="#d73027"),
+                    labels=c("TRUE"=paste0("Sharpe > SPY (",round(spy_sharpe_ma,2),")"),"FALSE"=paste0("Sharpe < SPY")),
+                    name=NULL) +
+  scale_y_continuous(expand=expansion(mult=c(0,0.18)), limits=c(0,1)) +
+  theme_minimal(base_size=12) +
+  theme(panel.grid.minor=element_blank(), panel.grid.major.y=element_blank(),
+        legend.position="bottom",
+        plot.title=element_text(face="bold",size=14),
+        plot.subtitle=element_text(size=10,colour="grey40")) +
+  labs(title="Top 20 Meta-Asset Pairs — Ranked by Composite Score",
+       subtitle="Label = Information Ratio | Blue = beats SPY Sharpe",
+       x=NULL, y="Composite Score")
+
+# ── Plot 3: Regime alpha profile for top 6 ───────────────────────────────────
+top6_ma <- best_pairs_ma %>% slice_head(n=6)
+
+regime_profile_ma <- map_dfr(seq_len(nrow(top6_ma)), function(i) {
+  p  <- top6_ma[i,]
+  r1 <- as.numeric(na.omit(xts_ret[,p$tk1]))
+  r2 <- as.numeric(na.omit(xts_ret[,p$tk2]))
+  n  <- min(length(r1),length(r2),length(as.numeric(na.omit(spy_ret))))
+  r1 <- tail(r1,n); r2 <- tail(r2,n)
+  bx <- xts(p$w1*r1+p$w2*r2, order.by=tail(index(spy_ret),n))
+  ba <- regime_alphas_ma(bx, spy_ret, rt)
+  a1 <- ticker_ra_ma[[p$tk1]]; a2 <- ticker_ra_ma[[p$tk2]]
+  lbl <- paste0(p$tk1,"+",p$tk2," (",p$weight_label,")")
+  bind_rows(
+    ba %>% mutate(series=lbl, is_blend=TRUE),
+    a1 %>% mutate(series=p$tk1, is_blend=FALSE),
+    a2 %>% mutate(series=p$tk2, is_blend=FALSE)
+  ) %>% mutate(pair=lbl)
+}) %>%
+  mutate(
+    regime   = factor(regime, levels=c("Fall","Recovery","Consolidation")),
+    fill_col = case_when(
+      is_blend & avg_alpha>=0  ~ "#1a1a6e",
+      is_blend & avg_alpha< 0  ~ "#d73027",
+      !is_blend & avg_alpha>=0 ~ "#7EB8E8",
+      TRUE                     ~ "#fc8d59"
+    )
+  )
+
+p_ma_regime <- ggplot(regime_profile_ma,
+                      aes(x=series, y=avg_alpha, fill=fill_col, alpha=is_blend)) +
+  geom_col(width=0.65) +
+  geom_hline(yintercept=0, linewidth=0.6, colour="grey30") +
+  geom_text(aes(label=sprintf("%+.1f%%",avg_alpha*100),
+                vjust=if_else(avg_alpha>=0,-0.3,1.2)),
+            size=2.6, fontface="bold") +
+  scale_fill_identity() +
+  scale_alpha_manual(values=c("TRUE"=1.0,"FALSE"=0.55), guide="none") +
+  scale_y_continuous(labels=percent_format(accuracy=1)) +
+  facet_grid(pair~regime, scales="free_x") +
+  theme_minimal(base_size=10) +
+  theme(strip.text.x=element_text(face="bold",size=10),
+        strip.text.y=element_text(face="bold",size=8,angle=0),
+        panel.grid.minor=element_blank(),
+        panel.grid.major.x=element_blank(),
+        axis.text.x=element_text(size=8,face="bold",angle=30,hjust=1),
+        axis.title=element_blank(),
+        plot.title=element_text(face="bold",size=14),
+        plot.subtitle=element_text(size=10,colour="grey40")) +
+  labs(title="Regime Alpha Profile — Top 6 Meta-Asset Pairs",
+       subtitle="Dark = blend alpha vs SPY | Light = individual component alpha")
+
+# ── Plot 4: Risk-return scatter ───────────────────────────────────────────────
+indiv_ma <- tibble(
+  label = SECTOR_TICKERS_MA,
+  mu    = map_dbl(SECTOR_TICKERS_MA, ~mean(as.numeric(na.omit(xts_ret[,.x])))*252),
+  vol   = map_dbl(SECTOR_TICKERS_MA, ~sd(as.numeric(na.omit(xts_ret[,.x])))*sqrt(252)),
+  type  = "Individual Sector"
+)
+blend_ma <- best_pairs_ma %>% slice_head(n=15) %>%
+  transmute(label=paste0(tk1,"+",tk2), mu=mu_blend, vol=sig_blend,
+            type="Meta-Asset (top 15)")
+spy_ma <- tibble(label="SPY", mu=spy_mu_ma, vol=spy_sig_ma, type="Benchmark")
+scatter_ma <- bind_rows(indiv_ma, blend_ma, spy_ma)
+
+p_ma_scatter <- ggplot(scatter_ma, aes(x=vol, y=mu, colour=type, size=type)) +
+  geom_point(alpha=0.80) +
+  geom_text_repel(aes(label=label), size=2.8, max.overlaps=20,
+                  segment.color="grey70", show.legend=FALSE) +
+  geom_hline(yintercept=spy_mu_ma, linetype="dashed", colour="grey50", linewidth=0.6) +
+  scale_colour_manual(values=c("Individual Sector"="#4A90D9",
+                                "Meta-Asset (top 15)"="#1a1a6e",
+                                "Benchmark"="#D90429"), name=NULL) +
+  scale_size_manual(values=c("Individual Sector"=2.5,"Meta-Asset (top 15)"=3.5,
+                              "Benchmark"=4), guide="none") +
+  scale_x_continuous(labels=percent_format(accuracy=1)) +
+  scale_y_continuous(labels=percent_format(accuracy=1)) +
+  theme_minimal(base_size=12) +
+  theme(panel.grid.minor=element_blank(), legend.position="bottom",
+        plot.title=element_text(face="bold",size=14),
+        plot.subtitle=element_text(size=10,colour="grey40")) +
+  labs(title="Risk-Return: Individual Sectors vs Top Meta-Asset Blends",
+       subtitle="Meta-assets (dark) cluster differently from individual sectors",
+       x="Annualised Volatility", y="Annualised Return")
+```
+
+```{r build-ranges-data, include=FALSE}
+library(tidyquant)
+
+RANGE_GROUPS <- list(
+  "Equity — US Broad"    = c("SPY", "QQQ", "VTI", "IWM", "IJH", "URTH", "ACWX", "IEFA", "FEZ", "EWJ"),
+  "Equity — Sector"      = c("XLK", "XLC", "XLV", "XLF", "XLI", "XLP", "XLY", "XLE", "XLB", "XLU", "XLRE"),
+  "Equity — Thematic"    = c("SMH", "AIQ", "IBB", "WCLD", "CIBR", "ITA", "VHT", "KRE", "ITB", "PSP"),
+  "Fixed Income"         = c("AGG", "SHY", "IEI", "IEF", "TLT", "HYG", "LQD", "EMB", "SGOV", "BNDX"),
+  "Commodity & Real"     = c("GLD", "SLV", "GDX", "DBA", "PDBC", "COPX", "URA", "LIT", "DJP", "MOO")
+)
+
+all_syms_rng <- unique(unlist(RANGE_GROUPS))
+
+raw_rng <- tq_get(all_syms_rng,
+                  get  = "stock.prices",
+                  from = Sys.Date() - 365,
+                  to   = Sys.Date()) %>%
+  filter(!is.na(close))
+
+raw_rng <- raw_rng %>%
+  group_by(symbol, date) %>%
+  slice_max(close, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+quote_rng <- raw_rng %>%
+  group_by(symbol) %>%
+  arrange(date) %>%
+  summarise(
+    last_date  = max(date),
+    last       = last(close),
+    prev_close = nth(close, -2),
+    day_high   = last(high),
+    day_low    = last(low),
+    wk52_high  = max(high,  na.rm = TRUE),
+    wk52_low   = min(low,   na.rm = TRUE),
+    volume     = last(volume),
+    avg_vol_3m = {
+      cutoff <- max(date) - 63
+      v      <- volume[date >= cutoff & !is.na(volume)]
+      if (length(v) > 0) mean(v) else NA_real_
+    },
+    .groups = "drop"
+  ) %>%
+  mutate(
+    change     = last - prev_close,
+    change_pct = change / prev_close,
+    pos_52wk   = (last - wk52_low) / (wk52_high - wk52_low),
+    n_day_low  = pmax((day_low  - wk52_low) / (wk52_high - wk52_low), 0),
+    n_day_high = pmin((day_high - wk52_low) / (wk52_high - wk52_low), 1),
+    n_last     = pos_52wk,
+    chg_col    = if_else(change >= 0, "#27AE60", "#C0392B"),
+    lbl_low    = sprintf("%.1f", wk52_low),
+    lbl_high   = sprintf("%.1f", wk52_high),
+    lbl_price  = sprintf("%.1f", last),
+    lbl_chg    = sprintf("(%+.1f%%)", change_pct * 100)
+  )
+
+# ── Build one plot per group ──────────────────────────────────────────────────
+make_range_plot <- function(symbols, group_title, label_size = 2.8,
+                             point_size = 3.0, bar_height = 0.35) {
+  df <- quote_rng %>%
+    filter(symbol %in% symbols, !is.na(n_last)) %>%
+    mutate(symbol = fct_reorder(symbol, n_last))
+
+  ggplot(df, aes(y = symbol)) +
+    geom_segment(aes(x = 0, xend = 1, yend = symbol),
+                 colour = "#DDDDDD", linewidth = bar_height * 10, lineend = "round") +
+    geom_segment(aes(x = n_day_low, xend = n_day_high, yend = symbol),
+                 colour = "#4A90D9", linewidth = bar_height * 5,  lineend = "round") +
+    geom_vline(xintercept = seq(0.10, 0.90, by = 0.10),
+               colour = "grey75", linewidth = 0.4, linetype = "dashed") +
+    geom_point(aes(x = n_last, fill = chg_col),
+               shape = 21, size = point_size, colour = "white", stroke = 1.2) +
+    scale_fill_identity() +
+    geom_text(aes(x = 0,      label = lbl_low),
+              hjust = 1.3,  vjust = 0.5, size = label_size, colour = "grey45") +
+    geom_text(aes(x = 1,      label = lbl_high),
+              hjust = -0.3, vjust = 0.5, size = label_size, colour = "grey45") +
+    geom_text(aes(x = n_last, label = lbl_price, colour = chg_col),
+              hjust = -0.45, vjust = 0.5, size = label_size, fontface = "bold") +
+    geom_text(aes(x = n_last, label = lbl_chg,   colour = chg_col),
+              vjust = -0.6,  hjust = 0.5, size = label_size, fontface = "bold") +
+    scale_colour_identity() +
+    scale_x_continuous(labels = percent_format(accuracy = 1),
+                       limits = c(-0.15, 1.15),
+                       breaks = seq(0, 1, by = 0.10),
+                       expand = expansion(0)) +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor   = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.title         = element_blank(),
+      axis.text.y        = element_text(face = "bold", size = 11),
+      axis.text.x        = element_text(size = 9, colour = "grey55"),
+      plot.title         = element_text(face = "bold", size = 13),
+      plot.subtitle      = element_text(size = 9, colour = "grey45"),
+      plot.caption       = element_text(size = 8, colour = "grey55")
+    ) +
+    labs(
+      title    = group_title,
+      subtitle = "0% = 52-wk low  |  100% = 52-wk high  |  Grey = 52-wk  |  Blue = today  |  Dot = last",
+      caption  = paste0("As of ", format(max(df$last_date, na.rm=TRUE), "%d %b %Y"))
+    )
+}
+
+range_plots <- imap(RANGE_GROUPS, make_range_plot)
+
+# ── XY plots per asset class group ───────────────────────────────────────────
+xy_plots <- imap(RANGE_GROUPS, function(symbols, grp_title) {
+  df <- quote_rng %>%
+    filter(symbol %in% symbols) %>%
+    rename(symbol = symbol)   # already named correctly
+  make_xy_plot(df, group_title = paste0("52-Wk Position Map — ", grp_title))
+})
+
+# ── XY scatter: % above Low vs % below High (full universe) ──────────────────
+xy_rng <- quote_rng %>%
+  filter(!is.na(last)) %>%
+  mutate(
+    pct_above_low  = (last - wk52_low)  / wk52_low  * 100,
+    pct_below_high = (wk52_high - last) / wk52_high * 100,
+    chg_col        = if_else(change >= 0, "#27AE60", "#C0392B")
+  ) %>%
+  left_join(etf_metadata %>% dplyr::select(ticker, asset_class),
+            by = c("symbol" = "ticker")) %>%
+  mutate(asset_class = replace_na(asset_class, "Other"))
+
+AC_PAL_RNG <- c(
+  "Equity"      = "#1B3A6B",
+  "FixedIncome" = "#27AE60",
+  "Commodity"   = "#E67E22",
+  "FX"          = "#C9A800",
+  "RealAsset"   = "#C0392B",
+  "MultiAsset"  = "#7F8C8D",
+  "Other"       = "#AAAAAA"
+)
+
+p_xy_rng <- ggplot(xy_rng, aes(x = pct_above_low, y = pct_below_high,
+                                colour = asset_class)) +
+  geom_vline(xintercept = mean(xy_rng$pct_above_low,  na.rm=TRUE),
+             linetype="dotted", colour="grey70", linewidth=0.5) +
+  geom_hline(yintercept = mean(xy_rng$pct_below_high, na.rm=TRUE),
+             linetype="dotted", colour="grey70", linewidth=0.5) +
+  geom_point(aes(shape = change >= 0), size = 3, alpha = 0.85) +
+  scale_shape_manual(values = c("TRUE"=16, "FALSE"=17), guide="none") +
+  geom_text_repel(aes(label = symbol), size = 2.8, fontface="bold",
+                  max.overlaps=40, segment.color="grey75", show.legend=FALSE) +
+  scale_colour_manual(values = AC_PAL_RNG, name="Asset Class", na.value="grey70") +
+  scale_x_continuous(labels = function(x) paste0("+", round(x), "%"),
+                     name   = "% Above 52-Wk Low",
+                     breaks = seq(0, ceiling(max(xy_rng$pct_above_low, na.rm=TRUE)/20)*20, by=20)) +
+  scale_y_reverse(labels = function(x) paste0("-", round(x), "%"),
+                  name   = "% Below 52-Wk High") +
+  annotate("text", x=Inf,  y=-Inf, hjust=1.1, vjust=-0.6,
+           label="Near 52-Wk HIGH", size=3.2, colour="grey50", fontface="italic") +
+  annotate("text", x=-Inf, y=Inf,  hjust=-0.1, vjust=1.5,
+           label="Near 52-Wk LOW",  size=3.2, colour="grey50", fontface="italic") +
+  theme_minimal(base_size=13) +
+  theme(panel.grid.minor=element_blank(),
+        panel.grid.major=element_line(colour="grey88", linewidth=0.4),
+        legend.position="right",
+        axis.title=element_text(size=12, face="bold"),
+        axis.text=element_text(size=10, face="bold"),
+        plot.title=element_text(face="bold", size=14),
+        plot.subtitle=element_text(size=10, colour="grey45")) +
+  labs(
+    title    = "52-Week Position Map — % Above Low vs % Below High",
+    subtitle = "Bottom-right = near 52-wk high  |  Top-left = near 52-wk low  |  Triangle = down today",
+    caption  = paste0("As of ", format(max(xy_rng$last_date, na.rm=TRUE), "%d %b %Y"))
+  )
+```
+
+## 5 · Pair Analysis — Cost-Benefit of Adding a Ticker
+
+<div class="insight-box">
+**What:** For every ETF, model the cost-benefit of a 10% satellite allocation
+alongside a 90% SPY core. Metrics: annualised return contribution, tracking error
+cost, and theoretical MaxDD (Magdon-Ismail formula vs empirical).
+This was the **first formulation** of what later became the Exante Hypothesis.
+</div>
+
+```{r p5-pair-scatter, fig.height=7}
+# Build cost-benefit vectors for the core universe
+T_yrs <- as.numeric(diff(range(index(xts_ret)))) / 365
+
+magdon_mdd <- function(sigma, mu, T) {
+  if (is.na(mu) || mu <= 0) return(sigma * sqrt(T))
+  S <- mu / sigma
+  (sigma / S) * (log(S * sqrt(T)) + 0.35)
+}
+
+cb_tbl <- map_dfr(core_universe, function(tk) {
+  r_tk  <- as.numeric(na.omit(xts_ret[, tk]))
+  r_spy <- as.numeric(na.omit(xts_ret[, "SPY"]))
+  n     <- min(length(r_tk), length(r_spy))
+  r_tk  <- tail(r_tk,  n)
+  r_spy <- tail(r_spy, n)
+
+  spread  <- r_tk - r_spy
+  mu_spr  <- mean(spread) * 252
+  sig_spr <- sd(spread) * sqrt(252)
+  mdd_emp <- {
+    w <- cumprod(1 + spread); min((w - cummax(w)) / cummax(w))
+  }
+  mdd_th  <- magdon_mdd(sig_spr, mu_spr, T_yrs)
+  rho     <- cor(r_tk, r_spy)
+
+  tibble(
+    ticker   = tk,
+    mu_spr   = mu_spr,
+    sig_spr  = sig_spr,
+    mdd_emp  = mdd_emp,
+    mdd_th   = mdd_th,
+    rho      = rho,
+    ir       = mu_spr / sig_spr
+  )
+}) %>%
+  left_join(etf_metadata %>% dplyr::select(ticker, asset_class, sub_block),
+            by = "ticker")
+
+ggplot(cb_tbl, aes(x = mdd_th, y = mdd_emp, colour = asset_class)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_point(aes(size = abs(ir)), alpha = 0.8) +
+  geom_text_repel(aes(label = ticker), size = 3, max.overlaps = 15,
+                  segment.color = "grey70", show.legend = FALSE) +
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_size_continuous(range = c(2, 7), name = "|IR|") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+  labs(
+    title    = "P5: Theoretical vs Empirical MaxDD — Spread vs SPY",
+    subtitle = "Diagonal = theory equals empirical | Above diagonal = empirical DD worse than predicted",
+    x = "Theoretical MaxDD (Magdon-Ismail formula)",
+    y = "Empirical MaxDD (historical)",
+    colour = NULL
+  )
+```
+
+<div class="finding-box">
+**Key finding:** For high-correlation tickers (corr > 0.8), empirical MaxDD closely
+matches the Magdon-Ismail theoretical prediction. For near-zero correlation tickers,
+empirical MaxDD is systematically *worse* than theory — they produce larger-than-expected
+drawdowns. This was the first signal of the anti-diversification phenomenon.
+</div>
+
+### P5b — XLK vs SPY: Regime-by-Regime Relative Overlay
+
+<div class="insight-box">
+**What:** XLK (Technology Select Sector) is a concentrated bet on the largest
+SPY subsector. This overlay shows, period-by-period, whether XLK enhanced or
+detracted relative to SPY across every Fall, Recovery, and Consolidation episode.
+It is the most direct test of the satellite role played by the tech satellite in
+the SAA portfolio.
+</div>
+
+```{r p5b-xlk-overlay, fig.height=8}
+print(plot_regime_rel_overlay(
+  xts_ret = xts_ret,
+  tickers = c("XLK"),
+  master  = "SPY",
+  t_fall  = T_FALL
+))
+```
+
+```{r p5b-xlk-heatmap, fig.height=5}
+print(plot_regime_rel_heatmap(
+  xts_ret = xts_ret,
+  tickers = c("XLK"),
+  master  = "SPY"
+))
+```
+
+<div class="finding-box">
+**Key finding — XLK vs SPY:**
+XLK is a high-correlation satellite (ρ ≈ 0.95 vs SPY). Its alpha pattern is
+asymmetric: it shows **ALPHA** type outperformance (both up, XLK more) in
+Consolidation and Recovery, but **LOSS** or **EXPOSED** in Fall — amplifying
+drawdowns relative to SPY. This makes XLK a pure growth-tilted satellite:
+rewarding in calm/rising markets, punishing in stress. Appropriate as a small
+(5%) position within the SAA, not as a hedge.
+</div>
+
+### P5b-ext — Extended Regime Overlay ★
+
+<div class="insight-box">
+**What (GEM):** `plot_regime_overlay_ext()` — three-layer regime intelligence in one chart.
+Row 1 (BMK): SPY cumulative return with Fall/Recovery/Consolidation shading and per-regime return labels.
+Row 2 (ticker): overlay cumulative return with per-regime return labels.
+Row 3 (Rel): per-regime green/red bar — green when ticker beat BMK in that period, red when it lagged, with α% label.
+Below: relative cumulative return area panel (ticker vs BMK) with current α annotated.
+</div>
+
+```{r p5b-ext-qqq, fig.height=9}
+print(plot_regime_overlay_ext("QQQ", bmk = "SPY", xts_ret = xts_ret))
+```
+
+```{r p5b-ext-xlk, fig.height=9}
+print(plot_regime_overlay_ext("XLK", bmk = "SPY", xts_ret = xts_ret))
+```
+
+```{r p5b-ext-gld, fig.height=9}
+print(plot_regime_overlay_ext("GLD", bmk = "SPY", xts_ret = xts_ret))
+```
+
+### P5b-triple — Triple Overlay + Rolling 12m Relative Return
+
+<div class="insight-box">
+**What:** `plot_regime_triple()` — compact two-panel view per ticker.
+Top: BMK (red) + ticker (dark blue) + relative cumulative return (grey) on one shared axis with three bar strips.
+Bottom: rolling 252-day relative return ribbon — green when ticker outperforms over trailing year, red when it lags. Regime shading on both panels.
+</div>
+
+```{r p5b-triple-qqq, fig.height=9}
+print(plot_regime_triple("QQQ", bmk = "SPY", xts_ret = xts_ret))
+```
+
+```{r p5b-triple-xlk, fig.height=9}
+print(plot_regime_triple("XLK", bmk = "SPY", xts_ret = xts_ret))
+```
+
+```{r p5b-triple-gld, fig.height=9}
+print(plot_regime_triple("GLD", bmk = "SPY", xts_ret = xts_ret))
+```
+
+### P5c — Full Pair Analysis: L/S Decomposition & DD Theory
+
+<div class="insight-box">
+**What:** Every active allocation = benchmark + L/S overlay on (new − funded asset).
+The funded-from asset determines spread vol and TE. Five concrete decisions tested
+at 10% notional against a 60/40 benchmark. Key question: does the active bet earn
+enough to justify its drawdown cost?
+</div>
+
+### P5c — KF2 Winners: All Three vs SPY
+
+<div class="insight-box">
+**What:** Full 7-panel deep-dive for each of the three KF2 winners (SMH, XLK, QQQ) —
+the only tickers in the Sovereign Universe that pass ρ ≥ 0.75 **and** have positive IR
+vs SPY. Panels: cumulative wealth · L/S spread · drawdown · return distribution ·
+rolling correlation · regime overlay · rolling IR.
+</div>
+
+```{r p5c-xlk-combined, fig.height=35}
+# XLK — IR 0.51 | ρ 0.92 | Spread MaxDD −18.4% | ΔDD 0.0%
+print(pair_results[[1]]$out$combined)
+```
+
+```{r p5c-smh-combined, fig.height=35}
+# SMH — IR 0.90 | ρ 0.79 | Spread MaxDD −27.2% | ΔDD −0.8%
+print(pair_results[[2]]$out$combined)
+```
+
+```{r p5c-qqq-combined, fig.height=35}
+# QQQ — IR 0.48 | ρ 0.93 | Spread MaxDD −21.1% | ΔDD +0.3%
+print(pair_results[[3]]$out$combined)
+```
+
+```{r p5c-master-table, results='asis'}
+map_dfr(pair_results, function(r) {
+  ps <- r$ps
+  tibble(
+    Decision     = r$decision,
+    Type         = r$type,
+    `ρ`          = round(ps$rho,        2),
+    `Spread Vol` = percent(ps$sig,      accuracy = 0.1),
+    `Spread IR`  = round(ps$ir,         2),
+    `E[Spread]`  = percent(ps$mu,       accuracy = 0.1),
+    `MaxDD act`  = percent(abs(ps$mdd), accuracy = 0.1),
+    `MaxDD th`   = percent(ps$mdd_theory, accuracy = 0.1),
+    `TE (10%)`   = percent(ps$te_10pct, accuracy = 0.01),
+    `Ret (10%)`  = percent(ps$ret_10pct,accuracy = 0.01)
+  )
+}) %>%
+  arrange(Type, desc(`Spread IR`)) %>%
+  knitr::kable(caption = "All five decisions ranked by type — 10% notional vs 60/40")
+```
+
+```{r p5c-spread-vol, fig.height=5}
+map_dfr(pair_results, function(r) {
+  tibble(decision = r$decision, type = r$type,
+         spread_vol = r$ps$sig, ir = r$ps$ir)
+}) %>%
+  mutate(decision = fct_reorder(decision, spread_vol)) %>%
+  ggplot(aes(x = decision, y = spread_vol, fill = type)) +
+  geom_col(width = 0.65, alpha = 0.85) +
+  geom_text(aes(label = sprintf("IR=%.2f", ir)),
+            hjust = -0.15, size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_fill_manual(values = c("Equity swap" = "#457B9D",
+                                "Cross-asset" = "#D90429")) +
+  scale_y_continuous(labels = percent_format(accuracy = 1),
+                     expand = expansion(mult = c(0, 0.18))) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.position = "bottom",
+        plot.title = element_text(face = "bold", size = 13),
+        plot.subtitle = element_text(colour = "grey50", size = 9)) +
+  labs(title    = "Spread Volatility by Decision (10% notional)",
+       subtitle = "Blue = funded from SPY (equity swap)  |  Red = funded from AGG (cross-asset)\nIR labels = full-period Information Ratio",
+       x = NULL, y = "Annualised Spread Vol", fill = NULL)
+```
+
+```{r p5c-ir, fig.height=5}
+ir_df <- map_dfr(pair_results, function(r) {
+  tibble(decision  = r$decision, type = r$type,
+         ir        = r$ps$ir,
+         p_correct = 0.5 + r$ps$ir / 2)
+})
+
+ir_df %>%
+  mutate(decision = fct_reorder(decision, ir)) %>%
+  ggplot(aes(x = decision, y = ir, fill = type)) +
+  geom_col(width = 0.65, alpha = 0.85) +
+  geom_hline(yintercept = 0.50, linetype = "dashed",
+             colour = "#2D6A4F", linewidth = 0.8) +
+  geom_hline(yintercept = 0.30, linetype = "dotted",
+             colour = "grey50", linewidth = 0.6) +
+  annotate("text", x = 0.6, y = 0.52, hjust = 0, size = 3,
+           colour = "#2D6A4F", label = "IR = 0.50 (top quartile)") +
+  geom_text(aes(label = sprintf("P=%.0f%%", p_correct * 100)),
+            hjust = -0.2, size = 3.5, fontface = "bold") +
+  coord_flip() +
+  scale_fill_manual(values = c("Equity swap" = "#457B9D",
+                                "Cross-asset" = "#D90429")) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.2))) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        legend.position = "bottom",
+        plot.title = element_text(face = "bold", size = 13),
+        plot.subtitle = element_text(colour = "grey50", size = 9)) +
+  labs(title    = "Information Ratio by Decision",
+       subtitle = "P = probability forecast must be correct to justify the bet",
+       x = NULL, y = "IR", fill = NULL)
+```
+
+<div class="finding-box">
+**Key findings — Pair Analysis:**
+(1) **Equity sleeve swaps** (sector vs SPY, ρ > 0.85) have low spread vol (~10%)
+and small TE at 10% notional — the hurdle return is achievable with modest conviction.
+(2) **Cross-asset additions** (equity vs AGG, ρ ≈ −0.20) have 2–3× higher spread vol
+and TE — the hurdle return is much higher; requires strong directional conviction.
+(3) **MaxDD theory confirms:** Sharpe² ≈ Calmar. XLK spread has a higher Sharpe than
+cross-asset bets → smaller theoretical MaxDD per unit of active return.
+(4) **IR > 0.50** (top quartile) requires P(forecast correct) > 75% — a very high bar
+for sustained active calls on any single decision.
+</div>
+
+<small>Full report: `Rmd/pair_analysis_portfolio_construction.Rmd`</small>
+
+---
+
+### P5d — KF1: Anti-Diversification — Theory vs Empirical MaxDD (Full Universe)
+
+<div class="insight-box">
+**What:** For every ticker in the Sovereign Universe, compute the Magdon-Ismail
+theoretical MaxDD of the spread (ticker − SPY) and compare to the empirical MaxDD.
+The key question: does low correlation protect against drawdown, as conventional
+portfolio theory predicts?
+</div>
+
+```{r p5-kf1-scatter, fig.height=7}
+kf1_p1 <- ggplot(cb_tbl_kf, aes(x = mdd_th, y = mdd_emp, colour = rho_band)) +
+  geom_abline(slope = 1, intercept = 0,
+              linetype = "dashed", colour = "grey50", linewidth = 0.8) +
+  annotate("text",
+           x = min(cb_tbl_kf$mdd_th, na.rm = TRUE) * 0.55,
+           y = min(cb_tbl_kf$mdd_emp, na.rm = TRUE) * 0.97,
+           label = "Empirical DD worse\nthan theory predicts",
+           hjust = 0, vjust = 1, size = 4, colour = "grey35", fontface = "italic") +
+  annotate("text",
+           x = max(cb_tbl_kf$mdd_th, na.rm = TRUE) * 0.97,
+           y = max(cb_tbl_kf$mdd_th, na.rm = TRUE) * 0.55,
+           label = "Theory overstates DD",
+           hjust = 1, vjust = 0, size = 4, colour = "grey35", fontface = "italic") +
+  geom_point(aes(size = abs(rho)), alpha = 0.78) +
+  geom_text_repel(
+    data = cb_tbl_kf %>%
+      group_by(rho_band) %>%
+      slice_min(residual, n = 3) %>%
+      ungroup(),
+    aes(label = ticker),
+    size = 3.8, fontface = "bold", max.overlaps = 40,
+    segment.color = "grey60", show.legend = FALSE
+  ) +
+  scale_colour_manual(values = RHO_PAL, name = "ρ vs SPY") +
+  scale_size_continuous(range = c(2, 6), guide = "none") +
+  scale_x_continuous(labels = percent_format(accuracy = 1)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.minor  = element_blank(),
+    legend.position   = "right",
+    legend.text       = element_text(size = 12),
+    legend.title      = element_text(size = 12, face = "bold"),
+    axis.title        = element_text(size = 13),
+    axis.text         = element_text(size = 12),
+    plot.title        = element_text(face = "bold", size = 15),
+    plot.subtitle     = element_text(size = 12, colour = "grey40")
+  ) +
+  labs(
+    title    = "KF1-A: Theoretical vs Empirical MaxDD of Spread vs SPY",
+    subtitle = paste0(
+      "Below diagonal = empirical DD worse than Magdon-Ismail predicts\n",
+      "Low-ρ tickers (red/orange) cluster below the diagonal — anti-diversification in action"
+    ),
+    x = "Theoretical MaxDD of spread (Magdon-Ismail)",
+    y = "Empirical MaxDD of spread (historical)"
+  )
+print(kf1_p1)
+```
+
+```{r p5-kf1-boxplot, fig.height=6}
+kf1_p2 <- ggplot(cb_tbl_kf, aes(x = rho_band, y = residual, fill = rho_band)) +
+  geom_hline(yintercept = 0, linewidth = 0.8, colour = "grey30") +
+  geom_boxplot(alpha = 0.75, outlier.shape = NA, width = 0.5) +
+  geom_jitter(aes(colour = rho_band), width = 0.18, size = 2.5, alpha = 0.6) +
+  geom_text_repel(
+    data = cb_tbl_kf %>%
+      group_by(rho_band) %>%
+      slice_min(residual, n = 2) %>%
+      ungroup(),
+    aes(label = ticker, colour = rho_band),
+    size = 3.5, fontface = "bold", max.overlaps = 20,
+    segment.color = "grey60", show.legend = FALSE,
+    nudge_x = 0.3
+  ) +
+  scale_fill_manual(values  = RHO_PAL, guide = "none") +
+  scale_colour_manual(values = RHO_PAL, guide = "none") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    axis.title         = element_text(size = 13),
+    axis.text          = element_text(size = 13),
+    plot.title         = element_text(face = "bold", size = 15),
+    plot.subtitle      = element_text(size = 12, colour = "grey40")
+  ) +
+  labs(
+    title    = "KF1-B: Residual (Empirical − Theory) MaxDD by ρ Band",
+    subtitle = paste0(
+      "Below zero = empirical DD worse than theory predicts\n",
+      "Low-ρ bands have deeper and more consistent negative residuals"
+    ),
+    x = "Correlation band vs SPY",
+    y = "Residual MaxDD (empirical − theory)"
+  )
+print(kf1_p2)
+```
+
+<div class="finding-box">
+**KF1 — Anti-Diversification:** Low-correlation tickers have **worse** empirical MaxDD
+than Magdon-Ismail theory predicts (they cluster below the diagonal in KF1-A).
+High-ρ tickers track theory closely. Conventional wisdom — "add a low-correlation
+asset to reduce portfolio risk" — fails for the MaxDD metric: near-zero ρ tickers
+go up and down for entirely different reasons than SPY, so when SPY falls hard
+the ticker may also fall, producing drawdowns theory did not anticipate.
+</div>
+
+<small>Full script: `key_findings/kf1_anti_diversification.R`</small>
+
+---
+
+### P5e — KF2: L/S Pair Selection Screen (Full Universe vs SPY)
+
+<div class="insight-box">
+**What:** Screen every ticker for suitability as the long leg in a Long ticker / Short SPY
+overlay. Two hard screens: ρ ≥ 0.75 AND spread MaxDD ≥ −30%. Among those that pass,
+rank by Information Ratio, ΔMaxDD, and empirical P(spread > 0 over 1 quarter).
+</div>
+
+```{r p5-kf2-screening, fig.height=7}
+kf2_p1 <- ggplot(spread_tbl_kf, aes(x = rho, y = mdd_spr, colour = rho_band)) +
+  geom_vline(xintercept = RHO_SCREEN, linetype = "dashed",
+             colour = "#27ae60", linewidth = 0.8) +
+  geom_hline(yintercept = MDD_SCREEN, linetype = "dashed",
+             colour = "#27ae60", linewidth = 0.8) +
+  annotate("rect",
+           xmin = RHO_SCREEN, xmax = Inf,
+           ymin = MDD_SCREEN, ymax = 0,
+           fill = "#eafaf1", alpha = 0.4) +
+  annotate("text", x = RHO_SCREEN + 0.01, y = -0.01,
+           label = "VALID L/S PAIR\nCANDIDATES",
+           hjust = 0, vjust = 1, size = 3.2,
+           colour = "#27ae60", fontface = "bold") +
+  geom_point(aes(size = abs(ir)), alpha = 0.75) +
+  geom_text_repel(
+    data = spread_tbl_kf %>% filter(passes_screen | rho > 0.80),
+    aes(label = ticker),
+    size = 2.8, max.overlaps = 20,
+    segment.color = "grey60", show.legend = FALSE
+  ) +
+  scale_colour_manual(values = RHO_PAL, name = "Correlation\nvs SPY") +
+  scale_size_continuous(range = c(1.5, 5), name = "|IR|") +
+  scale_x_continuous(labels = number_format(accuracy = 0.01)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position  = "right",
+    plot.title       = element_text(face = "bold", size = 13),
+    plot.subtitle    = element_text(size = 10, colour = "grey40")
+  ) +
+  labs(
+    title    = "KF2-A: L/S Pair Screening — ρ vs Spread MaxDD",
+    subtitle = sprintf(
+      "Green zone: ρ > %.2f AND spread MaxDD > %.0f%%  =  valid SPY-replacement candidates\nLow-ρ tickers have deep spread-DD — unsuitable as L/S legs regardless of standalone returns",
+      RHO_SCREEN, MDD_SCREEN * 100
+    ),
+    x = "Correlation vs SPY (ρ)",
+    y = "Spread MaxDD (Long ticker − Short SPY)"
+  )
+print(kf2_p1)
+```
+
+```{r p5-kf2-ir-ranking, fig.height=6}
+kf2_p2_data <- spread_tbl_kf %>%
+  filter(rho >= RHO_SCREEN) %>%
+  arrange(ir) %>%
+  mutate(ticker = factor(ticker, levels = ticker))
+
+kf2_p2 <- ggplot(kf2_p2_data, aes(x = ticker, y = ir, fill = ir > 0)) +
+  geom_col(alpha = 0.85) +
+  geom_hline(yintercept = 0, linewidth = 0.6, colour = "grey30") +
+  scale_fill_manual(values = c("TRUE" = "#1a1a6e", "FALSE" = "#d73027"), guide = "none") +
+  scale_y_continuous(labels = number_format(accuracy = 0.01)) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x        = element_text(angle = 60, hjust = 1, size = 9),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(size = 10, colour = "grey40")
+  ) +
+  labs(
+    title    = sprintf("KF2-B: IR of L/S Spread vs SPY — High-ρ Candidates (ρ > %.2f)", RHO_SCREEN),
+    subtitle = "Positive IR = ticker systematically outperforms SPY on a risk-adjusted basis",
+    x = NULL,
+    y = "Information Ratio (Ann excess return / Ann tracking error)"
+  )
+print(kf2_p2)
+```
+
+```{r p5-kf2-ir-vs-dd, fig.height=7}
+kf2_p3_data <- spread_tbl_kf %>%
+  filter(rho >= RHO_SCREEN) %>%
+  mutate(
+    quadrant = case_when(
+      ir > 0 & dd_delta > 0  ~ "Best: +IR, +ΔDD",
+      ir > 0 & dd_delta <= 0 ~ "Return edge only",
+      ir <= 0 & dd_delta > 0 ~ "DD protection only",
+      TRUE                    ~ "Neither"
+    ),
+    quadrant = factor(quadrant, levels = c(
+      "Best: +IR, +ΔDD", "Return edge only", "DD protection only", "Neither"
+    ))
+  )
+
+kf2_p3 <- ggplot(kf2_p3_data,
+                 aes(x = ir, y = dd_delta, size = prob_1q, colour = quadrant)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50", linewidth = 0.7) +
+  annotate("text", x =  0.95, y =  max(kf2_p3_data$dd_delta, na.rm = TRUE) * 0.92,
+           label = "Best zone\n+IR  +ΔDD", hjust = 1, size = 3.5,
+           colour = "#1a1a6e", fontface = "italic") +
+  annotate("text", x = min(kf2_p3_data$ir, na.rm = TRUE) * 0.85,
+           y =  max(kf2_p3_data$dd_delta, na.rm = TRUE) * 0.92,
+           label = "DD protection\nonly", hjust = 0, size = 3.2,
+           colour = "#27ae60", fontface = "italic") +
+  annotate("text", x =  0.95, y =  min(kf2_p3_data$dd_delta, na.rm = TRUE) * 0.92,
+           label = "Return edge\nonly", hjust = 1, size = 3.2,
+           colour = "#2196F3", fontface = "italic") +
+  geom_point(alpha = 0.80) +
+  geom_text_repel(
+    aes(label = ticker),
+    size = 3.5, fontface = "bold", max.overlaps = 30,
+    segment.color = "grey60", show.legend = FALSE
+  ) +
+  scale_colour_manual(values = QUAD_PAL, name = "Quadrant") +
+  scale_size_continuous(
+    range  = c(3, 14),
+    name   = "P(spread > 0\nover 1 Quarter)",
+    labels = percent_format(accuracy = 1),
+    breaks = c(0.45, 0.50, 0.55, 0.60, 0.65)
+  ) +
+  scale_x_continuous(labels = number_format(accuracy = 0.01)) +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.minor  = element_blank(),
+    legend.position   = "right",
+    legend.text       = element_text(size = 11),
+    legend.title      = element_text(size = 11, face = "bold"),
+    axis.title        = element_text(size = 12),
+    axis.text         = element_text(size = 11),
+    plot.title        = element_text(face = "bold", size = 14),
+    plot.subtitle     = element_text(size = 11, colour = "grey40")
+  ) +
+  labs(
+    title    = sprintf("KF2-C: IR vs ΔMaxDD — High-ρ Candidates (ρ > %.2f)", RHO_SCREEN),
+    subtitle = paste0(
+      "X = Information Ratio of spread  |  Y = MaxDD improvement vs pure SPY\n",
+      "Circle size = empirical P(spread > 0 over any 63-day window)  |  Best zone: top-right"
+    ),
+    x = "Information Ratio (spread vs SPY)",
+    y = "ΔMaxDD: blend vs pure SPY  (positive = improvement)"
+  )
+print(kf2_p3)
+```
+
+```{r p5-kf2-dd-bar, fig.height=6}
+kf2_p4_data <- spread_tbl_kf %>%
+  filter(rho >= RHO_SCREEN) %>%
+  arrange(dd_delta) %>%
+  mutate(ticker = factor(ticker, levels = ticker))
+
+kf2_p4 <- ggplot(kf2_p4_data, aes(x = ticker, y = dd_delta, fill = dd_delta > 0)) +
+  geom_col(alpha = 0.85) +
+  geom_hline(yintercept = 0, linewidth = 0.6, colour = "grey30") +
+  scale_fill_manual(values = c("TRUE" = "#27ae60", "FALSE" = "#d73027"), guide = "none") +
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  theme_minimal(base_size = 11) +
+  theme(
+    axis.text.x        = element_text(angle = 60, hjust = 1, size = 9),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    plot.title         = element_text(face = "bold", size = 13),
+    plot.subtitle      = element_text(size = 10, colour = "grey40")
+  ) +
+  labs(
+    title    = sprintf("KF2-D: MaxDD Improvement from 10%% Swap (High-ρ Only, ρ > %.2f)", RHO_SCREEN),
+    subtitle = "Green = 90% SPY + 10% ticker has LESS severe MaxDD than 100% SPY",
+    x = NULL,
+    y = "ΔMaxDD: blend vs pure SPY  (positive = improvement)"
+  )
+print(kf2_p4)
+```
+
+<div class="finding-box">
+**KF2 — L/S Pair Selection:** Only **3 tickers** in the full Sovereign Universe pass
+ρ ≥ 0.75 AND have positive IR vs SPY: **SMH** (ρ=0.79, IR=0.90), **XLK** (ρ=0.92,
+IR=0.51), **QQQ** (ρ=0.93, IR=0.48). All are Equity — no fixed income, commodities,
+or international passed the screen. Low-ρ "diversifiers" (GLD, IEF, TLT) are
+**not** valid L/S pair legs for SPY replacement — their spread volatility and
+drawdowns disqualify them from this role. The screening rule: ρ ≥ 0.75 AND
+spread MaxDD ≥ −30%.
+</div>
+
+<small>Full script: `key_findings/kf2_ls_pair_selection.R`</small>
+
+---
+
+## 6 · Long/Short Momentum Overlay
+
+<div class="insight-box">
+**What:** A dollar-neutral L/S portfolio in *relative-return space* (each position
+is Long ETF / Short SPY). Monthly rebalance, 1-quarter momentum signal.
+Two universes tested: full 59-ETF and a restricted 15-ETF core (PCA-derived).
+Phase 2: overlay added on top of a 50/50 SPY/AGG core portfolio.
+</div>
+
+```{r p6-ls-wealth, fig.height=6}
+p2_wealth_df <- data.frame(
+  date         = index(phase2_comp),
+  Core_5050    = as.numeric(cumprod(1 + phase2_comp[, "Core_5050"])),
+  LS_Core_15   = as.numeric(cumprod(1 + phase2_comp[, "LS_Core_15"])),
+  Core_plus_LS = as.numeric(cumprod(1 + phase2_comp[, "Core_plus_LS"]))
+) %>% pivot_longer(-date, names_to = "Series", values_to = "Wealth")
+
+pal_ls <- c(Core_5050 = "#95a5a6", LS_Core_15 = "#27ae60", Core_plus_LS = "#e74c3c")
+
+ggplot(p2_wealth_df, aes(x = date, y = Wealth, colour = Series, linewidth = Series)) +
+  geom_line() +
+  scale_colour_manual(values = pal_ls, name = NULL) +
+  scale_linewidth_manual(values = c(Core_5050 = 1, LS_Core_15 = 1, Core_plus_LS = 2),
+                         guide = "none") +
+  scale_y_log10(labels = dollar_format(prefix = "$")) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+  labs(title    = "P6a: Wealth Index — Core / L/S Overlay / Combined",
+       subtitle = "Log scale | $1 invested | Bold = Core + L/S overlay",
+       x = NULL, y = "Portfolio Value (log scale)")
+```
+
+```{r p6-ls-dd, fig.height=5}
+dd_xts <- Drawdowns(phase2_comp)
+dd_df <- data.frame(
+  date         = index(dd_xts),
+  Core_5050    = as.numeric(dd_xts[, "Core_5050"]),
+  LS_Core_15   = as.numeric(dd_xts[, "LS_Core_15"]),
+  Core_plus_LS = as.numeric(dd_xts[, "Core_plus_LS"])
+) %>%
+  pivot_longer(-date, names_to = "Series", values_to = "Drawdown") %>%
+  mutate(Series = factor(Series, levels = c("Core_5050", "LS_Core_15", "Core_plus_LS")))
+
+ggplot(dd_df, aes(x = date, y = Drawdown, colour = Series, linewidth = Series)) +
+  geom_line() +
+  geom_hline(yintercept = 0, colour = "grey40") +
+  scale_colour_manual(values = pal_ls, name = NULL) +
+  scale_linewidth_manual(values = c(Core_5050 = 0.8, LS_Core_15 = 0.8, Core_plus_LS = 1.6),
+                         guide = "none") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(), legend.position = "bottom") +
+  labs(title    = "P6b: Drawdown Comparison",
+       subtitle = "Core / L/S Overlay / Combined | Bold = Core + L/S",
+       x = NULL, y = "Drawdown")
+```
+
+```{r p6-ls-table, results='asis'}
+cat("\n**Annualised Performance Summary:**\n\n")
+ann <- table.AnnualizedReturns(phase2_comp, scale = 252) %>%
+  as.data.frame() %>%
+  rownames_to_column("Metric") %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+knitr::kable(ann, align = "lrrr")
+```
+
+<div class="finding-box">
+**Key findings:**
+(1) The L/S overlay generates a Sharpe of ~1.5 on the 15-ETF core universe —
+independent of market direction.
+(2) Adding the dollar-neutral overlay to the 50/50 core *improves* both return
+and Sharpe while keeping the drawdown profile similar.
+(3) The overlay is near-uncorrelated with the core (R² < 0.05), confirming it
+provides genuinely independent alpha.
+</div>
+
+<small>Full report: `Rmd/long_short_overlay_report.Rmd`</small>
+
+---
+
+## 7 · Exante Hypothesis — Enhancer vs Stabilizer
+
+<div class="insight-box">
+**What:** A systematic generalisation of the pair-analysis idea. For every ticker,
+measure the effect of a 50/50 blend with SPY on two dimensions simultaneously:
+return (delta_ret) and drawdown (delta_dd). Every ticker falls into one of four
+quadrants: Dominant / Enhancer / Stabilizer / Detractor.
+</div>
+
+```{r p7-quadrant, fig.height=9}
+print(plot_exante_quadrant(exante_tbl,
+                            horizon_sel = "full",
+                            label_n     = 8))
+```
+
+```{r p7-corr-dd, fig.height=7}
+print(plot_corr_dd(exante_tbl,
+                   horizon_sel = "full",
+                   show_loess  = TRUE))
+```
+
+```{r p7-summary, results='asis'}
+tbl_full <- exante_tbl %>% filter(horizon == "full")
+n_tot    <- nrow(tbl_full)
+role_sum <- tbl_full %>%
+  count(role) %>%
+  arrange(match(role, c("Dominant","Enhancer","Stabilizer","Detractor"))) %>%
+  mutate(pct = scales::percent(n / n_tot, accuracy = 1))
+
+knitr::kable(role_sum,
+             caption = "Exante role distribution — full sample vs SPY",
+             col.names = c("Role", "Count", "% of Universe"),
+             align = "lrr")
+```
+
+<div class="finding-box">
+**Key findings:**
+(1) Most tickers are **Stabilizers or Detractors** — they reduce return without a
+commensurate DD benefit, or worsen both dimensions.
+(2) **Dominant** tickers (better return *and* less DD) are rare but identifiable exante.
+(3) **The anti-diversification finding is confirmed:** the loess curve on the
+corr vs DD plot is *flat to negative* for correlation ∈ [0, 0.7]. Tickers
+with near-zero correlation to SPY produce *worse* blended DrawDown than
+high-correlation tickers, because their independent DD events are not
+offset by SPY's drawdown timing.
+The driver is the ticker's **own standalone MaxDD**, not its correlation.
+</div>
+
+<small>Full reports: `Rmd/exante_hypothesis_report.Rmd` (parameterised — runs for any BMK)</small>
+
+---
+
+## 8 · SAA Portfolio — Structure & Institutional Mapping
+
+<div class="insight-box">
+**What:** A concrete 6-ticker SAA (URTH / SPY / QQQ / XLK / SMH / AGG) is defined,
+visualised by role, and then mapped to an institutional allocation framework with
+three risk profiles (INC / BAL / GRO). Each institutional line item is matched to
+an ETF from the Sovereign Universe. The mapping reveals which institutional tilts
+are already implementable and which require new tickers.
+</div>
+
+### P8a — SAA Allocation by Role
+
+```{r p8-ggbar, fig.height=3.5}
+print(plot_saa_ggbar(xts_ret = xts_ret))
+```
+
+```{r p8-treemap, fig.height=5}
+print(plot_saa_treemap(xts_ret = xts_ret))
+```
+
+*Interactive plotly sunburst available as a standalone script: `key_plots/saa_sunburst_plotly.R`*
+
+---
+
+### P8b — Efficient Frontier — Sovereign Universe
+
+<div class="insight-box">
+**What:** Mean-variance efficient frontier across the full 96-ticker Sovereign Universe
+(long-only, fully-invested). Three reference portfolios: **GMV** (lowest possible
+volatility), **Max Sharpe** (best return per unit of risk), and the current **SAA**.
+SAA tickers shown as diamonds (◆).
+</div>
+
+```{r p8-frontier, fig.height=8}
+print(p_ef)
+```
+
+```{r p8-frontier-tables, results='asis'}
+cat("**GMV Portfolio** (global minimum variance — top holdings)\n\n")
+knitr::kable(ef_gmv_tbl, align = "llr")
+cat("\n\n**Max Sharpe Portfolio** (tangency — top holdings)\n\n")
+knitr::kable(ef_tan_tbl, align = "llr")
+```
+
+<div class="finding-box">
+**Key findings — Efficient Frontier:**
+(1) **SAA Sharpe = 0.44** vs frontier maximum of **1.46** — the SAA sits inside the
+frontier by design: a real allocation must respect diversification, capacity, and
+tracking-error constraints that the unconstrained optimizer ignores.
+(2) **GMV is T-bill dominated** (91% SGOV) — mathematically correct but not useful
+as an allocation; reflects that the lowest-vol asset in the universe is cash.
+(3) **Max Sharpe concentrates** in UUP + GLD + DXJ + SMH — a low-vol, high-IR
+cluster. Note that historical Sharpe is backward-looking; concentration risk is high.
+(4) **The frontier confirms** the anti-diversification finding: the highest-Sharpe
+candidates are high-ρ equity + uncorrelated low-vol assets (GLD), not a broad mix
+of zero-correlation diversifiers.
+</div>
+
+<small>Full script: `scripts_saa_taa/efficient_frontier.R`</small>
+
+---
+
+### P8c — Institutional SAA → ETF Vector
+
+The table below maps the institutional multi-profile allocation (INC / BAL / GRO)
+to the closest available ETF, distinguishing tickers already in the Sovereign Universe
+from those requiring a new download.
+
+```{r p8-mapping-table, results='asis'}
+inst_map <- tribble(
+  ~`Institutional Line`,          ~Role,  ~ETF,    ~Ticker, ~Status,
+  # ── Fixed Income ─────────────────────────────────────────────────────────────
+  "Cash & Short-Term Bonds",      "ECT",  "iShares 0-3M Treasury",           "SGOV",  "In universe",
+  "Bd Corp USD 1-10y",            "COR",  "iShares iBoxx IG Corp",            "LQD",   "In universe",
+  "Bd Govt US 1-10y",             "HDG",  "iShares 7-10Y Treasury",           "IEF",   "In universe",
+  "Bd Govt US 1-3y",              "HDG",  "iShares 1-3Y Treasury",            "SHY",   "In universe",
+  "Bd High Yield Global",         "YEN",  "iShares iBoxx HY Corp",            "HYG",   "In universe",
+  "Bd EM Corp HC",                "YEN",  "iShares JP Morgan USD EM Bond",    "EMB",   "In universe",
+  "Bd EM Local",                  "YEN",  "VanEck Local Currency EM Bond",    "EMLC",  "In universe",
+  "Bd Unconstrained",             "YEN",  "Vanguard Total Intl Bond Hedged",  "BNDX",  "In universe (partial)",
+  "Bd COCO hedged",               "YEN",  "—  (no US-listed ETF)",            "—",     "UCITS only",
+  # ── Equity ───────────────────────────────────────────────────────────────────
+  "Eq World DC",                  "COR",  "iShares MSCI World",               "URTH",  "In universe",
+  "Eq Value",                     "COR",  "Vanguard Value",                   "VTV",   "In universe",
+  "Eq US",                        "HOB",  "SPDR S&P 500",                     "SPY",   "In universe",
+  "Eq EMU",                       "HOB",  "SPDR Euro Stoxx 50",               "FEZ",   "In universe",
+  "Eq World ex US",               "HOB",  "iShares Core MSCI EAFE",           "IEFA",  "In universe",
+  "Eq Switzerland",               "ECT",  "iShares MSCI Switzerland",         "EWL",   "In universe",
+  "Eq China",                     "ECT",  "iShares China Large-Cap",          "FXI",   "In universe",
+  "Eq India",                     "ECT",  "iShares MSCI India",               "INDA",  "In universe",
+  "Eq Next Generation",           "ECT",  "Global X AI & Big Data",           "AIQ",   "In universe",
+  "Eq AC Asia ex Japan",          "EM",   "iShares MSCI AC Asia ex Japan",    "AAXJ",  "Needs download",
+  "Eq Latam",                     "HOB",  "iShares Latin America 40",         "ILF",   "Needs download",
+  "S&P 500 Hedge",                "ECT",  "ProShares Short S&P 500",          "SH",    "Needs download",
+  # ── Alternatives ─────────────────────────────────────────────────────────────
+  "Gold",                         "OTH",  "SPDR Gold Shares",                 "GLD",   "In universe",
+  "AI Hedge Funds",               "OTH",  "iM DBi Managed Futures (proxy)",   "DBMF",  "Needs download"
+)
+
+knitr::kable(
+  inst_map,
+  caption = "Institutional SAA line items mapped to Sovereign Universe ETFs",
+  align   = "llllc"
+)
+```
+
+### P8d — TAA Conviction Summary (INC / BAL / GRO)
+
+```{r p8-taa-tilts, fig.height=5}
+taa_tilts <- tribble(
+  ~`Asset Class`,     ~INC,   ~BAL,   ~GRO,
+  "Fixed Income",     -3.1,   -4.9,   -4.6,
+  "Equity",           +3.1,   +3.5,   +2.9,
+  "Alternatives",     +1.8,   +1.5,   +1.2
+) %>%
+  pivot_longer(-`Asset Class`, names_to = "Profile", values_to = "Tilt") %>%
+  mutate(
+    Profile    = factor(Profile, levels = c("INC", "BAL", "GRO")),
+    fill_color = if_else(Tilt >= 0, "#27ae60", "#e74c3c")
+  )
+
+ggplot(taa_tilts, aes(x = Profile, y = Tilt, fill = fill_color)) +
+  geom_col(width = 0.55, show.legend = FALSE) +
+  geom_hline(yintercept = 0, linewidth = 0.6) +
+  geom_text(aes(label = paste0(if_else(Tilt > 0, "+", ""), Tilt, "%"),
+                vjust = if_else(Tilt >= 0, -0.4, 1.3)),
+            size = 3.5, fontface = "bold") +
+  scale_fill_identity() +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  facet_wrap(~`Asset Class`, nrow = 1) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.title = element_blank(),
+        strip.text = element_text(face = "bold")) +
+  labs(title    = "TAA vs SAA Active Tilts by Risk Profile",
+       subtitle = "SAA = strategic weight | TAA = tactical deviation (Δ pp)")
+```
+
+```{r p8-taa-top-calls, results='asis'}
+top_calls <- tribble(
+  ~Direction, ~`Institutional Line`,       ~`Max Δ (GRO)`, ~Interpretation,
+  "SELL",     "Bd Govt US 1-10y (IEF)",    "−10.0 pp",     "Completely eliminated — no duration exposure",
+  "SELL",     "Eq US (SPY)",               "−11.1 pp",     "Largest single equity reduction",
+  "SELL",     "Eq World Core (URTH)",      "−8.2 pp",      "Trimming broad global equity",
+  "SELL",     "AI Hedge Funds",            "−2.0 pp",      "Fully removed across all profiles",
+  "BUY",      "Gold (GLD)",               "+3.3 pp",       "Doubled from SAA 3.5% → ~7%",
+  "BUY",      "Eq Value (VTV)",            "+9.7 pp",      "Largest single tactical add",
+  "BUY",      "Eq EMU (FEZ)",             "+2.8 pp",       "Zero in SAA → added in all profiles",
+  "BUY",      "Bd Corp USD (LQD)",         "+3.8 pp",      "Credit replacing duration in FI"
+)
+
+knitr::kable(top_calls,
+             caption = "Top 8 TAA conviction calls — ranked by GRO profile Δ",
+             align   = "lllll")
+```
+
+```{r p8-fx-tilts, fig.height=4.5}
+fx_tilts <- tribble(
+  ~CCY,   ~INC,   ~BAL,   ~GRO,
+  "USD",  -10.6,  -13.4,  -15.9,
+  "EUR",   +1.6,   +2.5,   +3.3,
+  "CHF",   +1.9,   +3.0,   +3.9,
+  "XAU",   +3.8,   +3.6,   +3.3,
+  "CNY",   +0.9,   +1.4,   +1.9
+) %>%
+  pivot_longer(-CCY, names_to = "Profile", values_to = "Tilt") %>%
+  mutate(
+    Profile    = factor(Profile, levels = c("INC", "BAL", "GRO")),
+    CCY        = factor(CCY, levels = c("USD", "EUR", "CHF", "XAU", "CNY")),
+    fill_color = if_else(Tilt >= 0, "#27ae60", "#e74c3c")
+  )
+
+ggplot(fx_tilts, aes(x = CCY, y = Tilt, fill = fill_color)) +
+  geom_col(width = 0.6, show.legend = FALSE) +
+  geom_hline(yintercept = 0, linewidth = 0.6) +
+  geom_text(aes(label = paste0(if_else(Tilt > 0, "+", ""), Tilt, "%"),
+                vjust = if_else(Tilt >= 0, -0.4, 1.3)),
+            size = 3.2, fontface = "bold") +
+  scale_fill_identity() +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  facet_wrap(~Profile, nrow = 1) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        axis.title = element_blank(),
+        strip.text = element_text(face = "bold")) +
+  labs(title    = "FX Exposure Tilts — TAA vs SAA",
+       subtitle = "USD derisking is the dominant structural theme across all profiles")
+```
+
+<div class="finding-box">
+**Key findings:**
+(1) **17 of 21 institutional line items** are already covered by the Sovereign Universe —
+only AAXJ, ILF, SH, and DBMF require new downloads.
+(2) **USD derisking** is the single largest structural TAA call: −10.6 pp (INC) to −15.9 pp (GRO),
+offset by EUR, CHF, and Gold.
+(3) **Govt bonds completely eliminated** in TAA — replaced by IG Corp and credit for yield
+without adding duration.
+(4) **Gold doubled** (3.5% → ~7%) — highest-conviction TAA call in the sheet, aligns with
+the anti-diversification framework: GLD has low correlation to SPY *and* a shallow
+standalone DD — making it a genuine Dominant ticker in the Exante classification.
+(5) **Value equity dominates new equity adds** — the tactical rotation away from growth/broad
+towards value and non-US is consistent with a USD-bear, rate-normalisation view.
+</div>
+
+<small>Scripts: `scripts_saa_taa/saa_tree.R` | Interactive: `plot_saa_sunburst()` / `plot_saa_treemap()`</small>
+
+---
+
+## 9 · Meta-Asset Engine — Hierarchical Sector Combinations
+
+<div class="insight-box">
+**What:** A new idea: combine m=2 sector ETFs into a synthetic meta-asset whose
+regime profile is more balanced than either component alone. Scoring uses regime
+complementarity (negative regime-alpha correlation between components = good),
+blend Sharpe, MaxDD improvement vs SPY, and regime-alpha smoothness.
+Universe: 15 sector ETFs → 105 pairs scored at 9 weight grids each.
+</div>
+
+### P9a — Pair Scoring Heatmap
+
+```{r p9-heatmap, fig.height=7}
+print(p_ma_heatmap)
+```
+
+<div class="finding-box">
+**Key finding:** The highest-scoring pairs consistently combine a **growth/cyclical
+sector** (XLK, XLY) with a **defensive sector** (XLU, XLP, ITA, XLE). The cell
+label shows the optimal blend weight — growth sectors typically take 50–70%.
+</div>
+
+---
+
+### P9b — Top 20 Pairs Ranked
+
+```{r p9-ranked, fig.height=8}
+print(p_ma_ranked)
+```
+
+---
+
+### P9c — Regime Alpha Profile: Top 6 Meta-Assets
+
+```{r p9-regime-profile, fig.height=14}
+print(p_ma_regime)
+```
+
+<div class="finding-box">
+**Key finding:** The blend (dark bars) shows a smoother alpha profile across
+regimes than either individual component (light bars). The best pairs achieve
+positive or near-zero alpha in Fall while retaining positive alpha in Consolidation
+— the ideal regime profile for a building block.
+</div>
+
+---
+
+### P9d — Risk-Return: Individual vs Meta-Asset Blends
+
+```{r p9-scatter, fig.height=6}
+print(p_ma_scatter)
+```
+
+<div class="finding-box">
+**Key findings — Meta-Asset Engine:**
+(1) **XLK + ITA** (50/50) is the top-ranked meta-asset: Tech ALPHA in Consolidation
+is offset by Defense's relative stability in Fall. Composite score 0.96.
+(2) **XLK + XLU** (60/40) and **XLK + XLP** (60/40) follow — classic
+growth + defensive sector combinations.
+(3) **Regime complementarity** (ρ close to −1.0) is the strongest differentiator
+among high-Sharpe pairs — it separates pairs that merely blend return from pairs
+that genuinely smooth regime exposure.
+(4) **Next step:** feed meta-assets as building blocks into the efficient frontier
+and compare to individual-ticker frontier.
+</div>
+
+<small>Full script: `scripts_saa_structured/meta_asset_engine.R`</small>
+
+---
+
+## 10 · ETF Range Monitor — Current Price in 52-Week Context
+
+<div class="insight-box">
+**What:** For every key ticker in the Sovereign Universe, show where the current
+price sits within its 52-week range (normalised 0–100%). All tickers share the
+same x-axis scale — making cross-asset comparisons direct. Grouped by asset class.
+Grey bar = 52-wk range · Blue bar = today's range · Dot = last price.
+</div>
+
+### P10a — Equity: US Broad & International
+
+```{r p10-eq-us-range, fig.height=5.5}
+print(range_plots[["Equity — US Broad"]])
+```
+
+```{r p10-eq-us-xy, fig.height=6}
+print(xy_plots[["Equity — US Broad"]])
+```
+
+---
+
+### P10b — Equity: Sectors
+
+```{r p10-eq-sector-range, fig.height=6}
+print(range_plots[["Equity — Sector"]])
+```
+
+```{r p10-eq-sector-xy, fig.height=6}
+print(xy_plots[["Equity — Sector"]])
+```
+
+---
+
+### P10c — Equity: Thematic
+
+```{r p10-eq-thematic-range, fig.height=5.5}
+print(range_plots[["Equity — Thematic"]])
+```
+
+```{r p10-eq-thematic-xy, fig.height=6}
+print(xy_plots[["Equity — Thematic"]])
+```
+
+---
+
+### P10d — Fixed Income
+
+```{r p10-fi-range, fig.height=5.5}
+print(range_plots[["Fixed Income"]])
+```
+
+```{r p10-fi-xy, fig.height=6}
+print(xy_plots[["Fixed Income"]])
+```
+
+---
+
+### P10e — Commodity & Real Assets
+
+```{r p10-commodity-range, fig.height=5.5}
+print(range_plots[["Commodity & Real"]])
+```
+
+```{r p10-commodity-xy, fig.height=6}
+print(xy_plots[["Commodity & Real"]])
+```
+
+---
+
+### P10f — Full Universe Position Map
+
+```{r p10-xy-full, fig.height=8}
+print(p_xy_rng)
+```
+
+<div class="finding-box">
+**How to read:** Tickers near the **top** are near their 52-week high. Tickers near
+the **bottom** are far from their high. The dotted crosshairs mark the group averages.
+Green dot = up today · Red dot = down today.
+</div>
+
+<small>Full script: `utility/etf_ranges.R` | Refresh: `etf_ranges(symbols)`</small>
+
+---
+
+## 11 · Calendar Year Performance — Sector Focus
+
+```{r build-calendar-data, include=FALSE}
+CAL_TICKERS <- c("XLK", "XLI", "XLV", "XLP", "XLF", "QQQ", "SMH")
+xts_rel      <- readRDS(here("02_data_processed/xts_rel.rds"))
+```
+
+### P11a — Single Ticker: All Calendar Years
+
+```{r p11a-single, fig.height=6, fig.width=11}
+plot_calendar_perf(xts_ret[, "SPY"])
+```
+
+### P11b — Multi-Ticker: Sector Small Multiples
+
+```{r p11b-multi, fig.height=14, fig.width=11}
+plot_multi_calendar_perf(xts_ret[, CAL_TICKERS], ncol = 2)
+```
+
+### P11c — Absolute vs Relative: Each Ticker
+
+```{r p11c-rel, fig.height=6, fig.width=13, results='asis'}
+for (tk in CAL_TICKERS) {
+  cat(sprintf("\n\n#### %s\n\n", tk))
+  print(plot_rel_calendar_perf(tk, xts_ret, xts_rel))
+  cat("\n\n")
+}
+```
+
+<div class="finding-box">
+**How to read:** P11b shows all years per ticker on a free Y scale — useful for spotting which years were outliers. P11c pairs the absolute return (left) with the relative return vs SPY (right) on the **same Y axis**, so the gap between panels shows how much of the absolute return was driven by market beta vs genuine alpha.
+</div>
+
+<small>Full script: `utility/plot_calendar_perf.R`</small>
+
+---
+
+## 12 · Calendar Year Analog Projection — Trend vs Reversal
+
+```{r build-analog-data, include=FALSE}
+ANALOG_TICKERS <- c("SPY", "QQQ", "GLD", "TLT", "XLK", "SMH", "XLF", "XLI")
+```
+
+<div class="finding-box">
+**Method:** For each ticker, find historical calendar years whose YTD return
+(measured at today's trading-day-of-year) most closely resembles the current
+year. The shaded cone shows where those analog years went from today to
+year-end. P(Trend) = fraction of analog years that finished in the same
+direction as the current YTD. See `Rmd/calendar_analog_report.Rmd` for full
+academic background and methodology.
+</div>
+
+### P12a — Transition Matrices (Regime-Conditioned)
+
+```{r p12a-transitions, results='asis'}
+for (tk in ANALOG_TICKERS) {
+  cat(sprintf("\n\n#### %s\n\n", tk))
+  cat("```\n")
+  compute_transitions(xts_ret[, tk], rt)
+  cat("```\n\n")
+}
+```
+
+### P12b — Analog Projection Charts
+
+```{r p12b-analog, fig.height=7, results='asis'}
+for (tk in ANALOG_TICKERS) {
+  cat(sprintf("\n\n#### %s\n\n", tk))
+  print(plot_calendar_analog(xts_ret[, tk], rt))
+  cat("\n\n")
+}
+```
+
+<div class="finding-box">
+**How to read the cone:** Grey = all historical years. Blue = analog years
+(similar YTD at today's point). Inner cone = 25–75th pct of analog paths
+forward. Outer cone = 10–90th pct. Dashed = median analog path. Red = current
+year. The annotation box shows P(Trend), P(Reversal), the specific analog
+years used, and the current regime.
+
+**Honest caveat:** With ~15 years of data, a quoted "70% P(Trend)" carries
+a ±25% confidence interval. Use as directional context alongside the regime
+signal — not as a precise probability.
+</div>
+
+<small>Full script: `utility/plot_calendar_analog.R` | Full report: `Rmd/calendar_analog_report.Rmd`</small>
+
+---
+
+## Synthesis — The Connecting Thread
+
+```{r p-synthesis-table, results='asis'}
+synth <- tribble(
+  ~Analysis,                 ~`Core Question`,                             ~`Empirical Finding`,
+  "SPY Regime Engine",       "What phases does SPY itself go through?",    "3 states with radically different return/vol profiles",
+  "200DMA State Machine",    "Can we signal SPY entry/exit tactically?",   "Hysteresis (+4/-2%) cuts false signals vs simple crossover",
+  "Alpha by Regime",         "Which ETFs protect in Fall & participate in Consolidation?", "Safe havens LAG (not lose) in Recovery — abs return stays positive; alpha asymmetry favours holding GLD/IEF across the cycle",
+  "Safe Haven Signal",       "Can we predict regime transitions?",         "HYG correlation spike is a leading warning; LASSO AUC ~0.72",
+  "Pair Analysis",           "What is the DD cost of adding any ticker?",  "High-corr tickers: theory = empirical; zero-corr: empirical DD worse",
+  "L/S Overlay",             "Can we extract pure alpha from relative returns?", "Sharpe ~1.5 on core 15; near-zero R² vs core portfolio",
+  "Exante Hypothesis",       "Can we classify every ticker as Enhancer or Stabilizer?", "Confirmed: corr≈0 does NOT reduce MaxDD; standalone DD is the driver",
+  "SAA & Inst. Mapping",     "How does the SAA translate to ETFs and institutional profiles?", "17/21 inst. lines covered; USD derisking + Gold doubling are top TAA calls",
+  "Meta-Asset Engine",       "Can sector ETF pairs act as regime-balanced building blocks?",   "XLK+ITA, XLK+XLU, XLK+XLP top-ranked; regime complementarity ρ ≈ −1 is key differentiator",
+  "DAA Framework",           "Does regime-based TAA or trend filtering add value over passive?", "Regime rotation fails (lag + SAA drag); 200DMA filter reduces DD ticker-by-ticker with minimal return cost; best DD stabilizers ranked by insurance ratio"
+)
+knitr::kable(synth, align = "lll")
+```
+
+<div class="finding-box">
+**The unifying anti-diversification insight** (confirmed across analyses 5, 6 and 7):
+
+For a long-only investor blending SPY with any ticker, **the MaxDD of the blended
+portfolio is NOT minimised by minimising correlation**. It is minimised by
+minimising the ticker's own standalone drawdown severity. A ticker with
+correlation 0.8 to SPY but a shallow 15% standalone DD produces a better blended
+MaxDD than a ticker with correlation 0.1 but a 40% standalone DD.
+
+This overturns the standard diversification narrative for the risk metric that
+matters most to investors: drawdown — not variance.
+</div>
+
+---
+
+## 13 · DAA Framework — 200DMA Trend Filter & DD Stabilizers
+
+```{r p13-setup, include=FALSE}
+source(here("scripts_daa_saa_taa/01_saa_baseline.R"))
+
+daa_class_path <- here("02_data_processed/daa_class_tbl.rds")
+taa_hist_path  <- here("02_data_processed/taa_weights_history.rds")
+trend_sig_path <- here("02_data_processed/trend_signals.rds")
+daa_ret_path   <- here("02_data_processed/daa_returns.rds")
+stab_path      <- here("02_data_processed/dd_stabilizer_screen.rds")
+frontier_path  <- here("02_data_processed/dd_frontier_data.rds")
+
+source(here("key_plots/chart_stacked_weight_timeline.R"))
+source(here("key_plots/chart_ma200_signal_panel.R"))
+source(here("key_plots/chart_multi_wealth_endlabel.R"))
+source(here("key_plots/chart_dd_frontier.R"))
+# Note: regime_aware_alpha_tape.R excluded — uses legacy base_path variable
+# Note: yahoo_finance_range_plot.R excluded — superseded by utility/etf_ranges.R (Section 10)
+```
+
+> **Premise**: SPY/IEF 60/40 delivers adequate return over the long run.
+> The DAA framework pursues two separate goals:
+> (1) reduce drawdown via a 200DMA trend filter; (2) identify DD stabilizer
+> overlays that shrink MaxDD with minimum return sacrifice.
+
+### 13a · 200DMA Trend Signal — When Is Each Ticker Above Its MA?
+
+```{r p13-signal-heatmap, fig.width=13, fig.height=5, fig.cap="Green = trend ON (hold at SAA weight)  |  Red = trend OFF (weight parked in SGOV)"}
+if (file.exists(trend_sig_path)) {
+  trend_signals <- readRDS(trend_sig_path)
+  source(here("scripts_daa_saa_taa/03_taa_rules.R"))   # loads plot_signal_heatmap()
+  print(plot_signal_heatmap(trend_signals, SAA_60_40, rt))
+}
+```
+
+### 13b · Portfolio Composition — Weight Stack Over Time
+
+```{r p13-composition, fig.width=13, fig.height=6, fig.cap="SGOV expands when tickers fall below 200DMA  |  chart_stacked_weight_timeline"}
+if (file.exists(taa_hist_path)) {
+  taa_weights_history <- readRDS(taa_hist_path)
+  print(
+    plot_stacked_weight_timeline(
+      taa_weights_history, SAA_60_40, rt,
+      title    = "Portfolio Composition — 200DMA Trend Filter",
+      subtitle = "SGOV expands when tickers fall below 200DMA  |  Pink = Fall regime"
+    )
+  )
+}
+```
+
+### 13c · Equity Sleeve — Per-Ticker Price vs 200DMA
+
+```{r p13-eq-panel, fig.width=13, fig.height=14, fig.cap="Red shading = trend OFF — weight parked in SGOV  |  chart_ma200_signal_panel"}
+if (file.exists(trend_sig_path)) {
+  p_panels <- plot_ma200_signal_panel(trend_signals, SAA_60_40)
+  if (!is.null(p_panels$eq)) print(p_panels$eq)
+}
+```
+
+### 13d · Backtest — DAA vs SAA vs Passive 60/40
+
+```{r p13-backtest, fig.width=13, fig.height=6, fig.cap="chart_multi_wealth_endlabel — direct end-of-line labels, ann return appended"}
+if (file.exists(daa_ret_path) && exists("saa_returns") && exists("benchmark_returns")) {
+  daa_returns <- readRDS(daa_ret_path)
+  ret_list <- list(
+    DAA           = daa_returns,
+    SAA_60_40     = saa_returns,
+    Passive_60_40 = benchmark_returns
+  )
+  print(
+    plot_multi_wealth_endlabel(
+      ret_list, rt,
+      colours = c("#7c3aed", "#3b82f6", "#9ca3af"),
+      labels  = c("DAA — 200DMA filter", "SAA 60/40 (JB universe)", "Passive SPY/IEF")
+    )
+  )
+}
+```
+
+### 13e · DD Stabilizer Quadrant
+
+```{r p13-stabilizer-quad, fig.width=13, fig.height=8, fig.cap="Insurance Quadrant — x=return drag, y=MaxDD reduction, bubble=Fall correlation"}
+if (file.exists(stab_path)) {
+  stabilizer_screen <- readRDS(stab_path)
+  source(here("scripts_daa_saa_taa/05_dd_stabilizer.R"))
+  print(plot_insurance_quad(stabilizer_screen))
+}
+```
+
+```{r p13-dd-frontier, fig.width=13, fig.height=7, fig.cap="DD Frontier — trade-off curve per instrument as overlay weight increases 0→25%"}
+if (file.exists(frontier_path)) {
+  dd_frontier_data <- readRDS(frontier_path)
+  print(plot_dd_frontier(dd_frontier_data))
+}
+```
+
+<div class="finding-box">
+**DAA Key Finding**: The 200DMA trend filter reduces drawdown at the cost of
+minor return lag in fast recoveries (classic momentum overshoot). The signal
+is ticker-level (only the broken ticker parks), not portfolio-level, which avoids
+the regime-detection lag that made the regime-rotation TAA ineffective.
+The DD Stabilizer screen identifies instruments that improve the passive 60/40
+MaxDD with the lowest return sacrifice — ranked by insurance ratio = DD reduction / return drag.
+</div>
+
+---
+
+## Section 14 — DD Overlay Optimizer: Minimum-Cost DrawDown Reduction
+
+> **Question answered:** Given we accept SPY/IEF 60/40 returns, what is the
+> cheapest combination of instruments that reduces MaxDD from ~23% to ~15%?
+
+```{r p13-overlay-setup, include=FALSE}
+overlay_grid_path    <- here("02_data_processed/overlay_grid.rds")
+pareto_path          <- here("02_data_processed/pareto_frontier.rds")
+solutions_path       <- here("02_data_processed/overlay_target_solutions.rds")
+
+if (!all(file.exists(overlay_grid_path, pareto_path, solutions_path))) {
+  message("07_dd_overlay_optimizer.R not yet run — skipping Section 14 plots.")
+  overlay_ready <- FALSE
+} else {
+  source(here("scripts_daa_saa_taa/07_dd_overlay_optimizer.R"))
+  overlay_ready <- TRUE
+}
+```
+
+### 14a · Overlay Efficiency Frontier
+
+```{r p13-overlay-frontier, fig.width=13, fig.height=8, fig.cap="Efficiency frontier — all single/pair/triple combinations; purple = Pareto-optimal path; red stars = cheapest combo per MaxDD target"}
+if (isTRUE(overlay_ready)) {
+  print(plot_overlay_frontier(overlay_grid, pareto_frontier, target_solutions))
+}
+```
+
+### 14b · Optimal Overlay Composition per DD Target
+
+```{r p13-overlay-bars, fig.width=13, fig.height=6, fig.cap="Recommended instrument weights for each MaxDD target — funded from SPY/IEF proportionally"}
+if (isTRUE(overlay_ready)) {
+  print(plot_optimal_bars(target_solutions))
+}
+```
+
+### 14c · Passive vs Optimal ≤15% Overlay: Wealth & Drawdown
+
+```{r p13-overlay-comparison, fig.width=13, fig.height=10, fig.cap="Cumulative wealth (top) and drawdown (bottom): passive 60/40 vs cheapest overlay achieving ≤15% MaxDD"}
+if (isTRUE(overlay_ready)) {
+  print(plot_overlay_comparison(target_solutions, passive_ret, xts_ret, rt))
+}
+```
+
+### 14d · Solution Summary Table
+
+```{r p13-overlay-solution-table, results='asis'}
+if (isTRUE(overlay_ready)) {
+  target_solutions %>%
+    mutate(
+      maxdd_pct  = sprintf("%.1f%%",   abs(maxdd)      * 100),
+      dd_saved   = sprintf("%+.1f pp", dd_reduction    * 100),
+      ann_ret    = sprintf("%+.1f%%",  ann_ret         * 100),
+      drag       = sprintf("%+.1f pp", return_drag     * 100),
+      total_w    = sprintf("%.0f%%",   total_weight    * 100)
+    ) %>%
+    select(`DD Target` = target_label,
+           `Instruments` = instruments,
+           `Weights` = weights_str,
+           `Total overlay` = total_w,
+           `MaxDD achieved` = maxdd_pct,
+           `DD saved` = dd_saved,
+           `Ann return` = ann_ret,
+           `Return drag` = drag) %>%
+    knitr::kable(align = "llcccrrr") %>%
+    kableExtra::kable_styling(bootstrap_options = c("striped", "condensed"), full_width = FALSE)
+}
+```
+
+<div class="finding-box">
+**Overlay Optimizer Key Finding**: The minimum-cost overlay to reduce MaxDD from
+~23% to ~15% combines a small number of uncorrelated instruments (typically 1–2)
+funded by proportional reduction of the passive SPY/IEF weights. The Pareto
+frontier quantifies the exact return-drag cost of each DD protection level,
+allowing a deliberate cost-benefit choice rather than an ad-hoc allocation.
+</div>
+
+---
+
+## 15 · Valuation — S&P 500 P/E Bands & Shiller CAPE
+
+> Current market multiple relative to historical norms — uses S&P Global
+> operating EPS (Bloomberg-style) for P/E price bands and Shiller 10-year
+> inflation-adjusted GAAP EPS (P/E10) for the CAPE chart.
+
+```{r p15-setup, include=FALSE}
+source(here("key_plots/chart_pe_bands.R"))
+```
+
+### 15a · P/E Price Bands (Operating EPS)
+
+```{r p15-pe-bands, fig.width=13, fig.height=7, fig.cap="S&P 500 P/E price bands — 5 coloured bands centred on rolling mean P/E, current price overlaid"}
+plot_pe_bands()
+```
+
+### 15b · Shiller CAPE (P/E10)
+
+```{r p15-shiller-cape, fig.width=13, fig.height=6, fig.cap="Shiller CAPE (P/E10) since 1950 — orange = CAPE, purple dashed = long-run avg, red/blue bands = ±1σ and ±2σ"}
+plot_shiller_cape()
+```
+
+<div class="finding-box">
+**Valuation Context**: P/E price bands show where current price sits relative to
+historically normalised multiples. CAPE smooths cyclical EPS swings over 10 years —
+useful for identifying secular overvaluation that single-year P/E can miss at earnings peaks.
+</div>
+
+---
+
+## 16 · Daily Return Heatmaps — SPY · GLD · URTH
+
+> Red = down day · Blue = up day · White = flat. Each row = one day-of-week across all weeks of the year.
+
+```{r p16-setup, include=FALSE}
+library(lattice); library(chron); library(grid)
+if (!requireNamespace("chron", quietly = TRUE)) install.packages("chron")
+
+# source the standalone script (auto-run guard suppressed by knitr.in.progress)
+source(here::here("key_plots/calendar_heatmap.R"))
+```
+
+```{r p16-heatmap-spy, fig.width=13, fig.height=9, fig.cap="SPY daily log returns — last 5 years"}
+plot_calendar_heatmap("SPY", n_yr = 5)
+```
+
+```{r p16-heatmap-gld, fig.width=13, fig.height=9, fig.cap="GLD daily log returns — last 5 years"}
+plot_calendar_heatmap("GLD", n_yr = 5)
+```
+
+```{r p16-heatmap-urth, fig.width=13, fig.height=9, fig.cap="URTH daily log returns — last 5 years"}
+plot_calendar_heatmap("URTH", n_yr = 5)
+```
+
+---
+
+## 17 · Calendar Year Analog Projection — SPY · GLD · URTH
+
+> Grey = all historical years · Blue = analog years (similar YTD at today's trading day) · Shaded cone = 10–90th pct of analog paths forward · Red = current year · Dashed = median analog path.
+
+```{r p17-setup, include=FALSE}
+source(here::here("utility/plot_calendar_analog.R"))
+source(here::here("scripts_spy_dd_regime/spy_dd_regime.R"))
+
+xts_ret_analog <- readRDS(here::here("02_data_processed/xts_ret_returns.rds"))
+rt_analog <- build_regime_table(xts_ret_analog[, "SPY"], t_fall = 0.10)
+```
+
+```{r p17-analog-spy, fig.width=13, fig.height=7, fig.cap="SPY — Calendar Year Analog Projection"}
+plot_calendar_analog(xts_ret_analog[, "SPY"], rt = rt_analog)
+```
+
+```{r p17-analog-gld, fig.width=13, fig.height=7, fig.cap="GLD — Calendar Year Analog Projection"}
+plot_calendar_analog(xts_ret_analog[, "GLD"], rt = rt_analog)
+```
+
+```{r p17-analog-urth, fig.width=13, fig.height=7, fig.cap="URTH — Calendar Year Analog Projection"}
+plot_calendar_analog(xts_ret_analog[, "URTH"], rt = rt_analog)
+```
+
+---
+
+## Navigation
+
+```{r p-navigation-table, results='asis'}
+nav <- tibble::tribble(
+  ~Report,                        ~Path,                                          ~`What it contains`,
+  "SPY Regime & State Machine",   "Rmd/spy_regime_statemachine_report.Rmd",       "Full 14-section regime engine + 200DMA SM",
+  "Safe Haven Regime Signal",     "Rmd/safe_haven_regime_report.Rmd",             "3-method regime prediction analysis",
+  "Pair Analysis",                "Rmd/pair_analysis_portfolio_construction.Rmd", "Cost-benefit vectors, Magdon-MDD theory",
+  "Universe Pair Analysis v2",    "Rmd/universe_pair_analysis_v2.Rmd",            "Category A (vs SPY) & B (vs AGG) shortlists",
+  "L/S Overlay",                  "Rmd/long_short_overlay_report.Rmd",            "Full L/S methodology + Phase 2",
+  "Exante Hypothesis",            "Rmd/exante_hypothesis_report.Rmd",             "Parameterised by benchmark — render_exante_report()",
+  "SAA Portfolio & Inst. Mapping","scripts_saa_taa/saa_tree.R",                   "SAA tree (ggbar + treemap) with YTD; inst. ETF vector",
+  "DAA — SAA Baseline",           "scripts_daa_saa_taa/01_saa_baseline.R",         "JB DAA 13-ticker 60/40 + passive SPY/IEF benchmark",
+  "DAA — Classifier",             "scripts_daa_saa_taa/02_daa_classifier.R",       "EQ-Enhancer / EQ-Stabilizer / FI-Enhancer taxonomy",
+  "DAA — 200DMA Trend Filter",    "scripts_daa_saa_taa/03_taa_rules.R",            "Signal heatmap + composition chart + per-ticker MA panels",
+  "DAA — Backtest",               "scripts_daa_saa_taa/04_daa_backtest.R",         "Walk-forward DAA vs SAA vs Passive; wealth + DD + regime excess",
+  "DAA — DD Stabilizer Screen",   "scripts_daa_saa_taa/05_dd_stabilizer.R",        "Insurance quadrant + DD frontier for all universe tickers",
+  "DAA — Overlay Optimizer",      "scripts_daa_saa_taa/07_dd_overlay_optimizer.R", "Pareto frontier + min-cost overlay for 15/17/19/21% MaxDD targets"
+)
+
+knitr::kable(nav, align = "lll",
+             col.names = c("Report", "Path", "What it contains")) %>%
+  kableExtra::column_spec(1, width = "4cm") %>%
+  kableExtra::column_spec(2, width = "6cm") %>%
+  kableExtra::column_spec(3, width = "6cm")
+```

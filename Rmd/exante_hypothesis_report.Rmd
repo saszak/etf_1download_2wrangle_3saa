@@ -1,0 +1,369 @@
+---
+title: "`r paste('Exante Hypothesis —', params$bmk, 'Benchmark')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+date: "`r Sys.Date()`"
+params:
+  bmk:      "SPY"   # Benchmark ticker — any column present in xts_ret
+  w_blend:  0.5     # Benchmark weight in the blend (1 - w_blend goes to ticker)
+  ret_eps:  0.005   # Return improvement threshold for role boundary (annualised)
+  risk_eps: 0.005   # DD improvement threshold for role boundary
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 8
+)
+
+library(tidyverse)
+library(xts)
+library(PerformanceAnalytics)
+library(scales)
+library(ggrepel)
+library(here)
+
+# PerformanceAnalytics masks dplyr::select — restore dplyr version
+select <- dplyr::select
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+source(here("scripts/00_init_universe.R"))
+source(here("scripts_exante_hypothesis/exante_engine.R"))
+source(here("scripts_exante_hypothesis/exante_visuals.R"))
+
+# ── Validate benchmark ────────────────────────────────────────────────────────
+if (!(params$bmk %in% colnames(xts_ret)))
+  stop(sprintf("Benchmark '%s' not found in xts_ret. Available: %s",
+               params$bmk,
+               paste(head(colnames(xts_ret), 10), collapse = ", ")))
+
+# ── Build metrics ─────────────────────────────────────────────────────────────
+exante_tbl <- build_exante_metrics(
+  xts_ret  = xts_ret,
+  bmk      = params$bmk,
+  horizons = c("full", "1Q", "1Y"),
+  w_blend  = params$w_blend,
+  ret_eps  = params$ret_eps,
+  risk_eps = params$risk_eps
+)
+
+exante_tbl <- enrich_with_metadata(exante_tbl, etf_metadata)
+
+# ── Convenience subsets ───────────────────────────────────────────────────────
+tbl_full <- exante_tbl %>% filter(horizon == "full")
+tbl_1Q   <- exante_tbl %>% filter(horizon == "1Q")
+tbl_1Y   <- exante_tbl %>% filter(horizon == "1Y")
+
+bmk_label   <- params$bmk
+blend_pct   <- round(params$w_blend * 100)
+ticker_pct  <- 100 - blend_pct
+```
+
+---
+
+## 1. Hypothesis & Framework
+
+The **Exante Hypothesis** formalises a practical question every portfolio allocator faces:
+
+> *Given a benchmark (`r bmk_label`), does adding a ticker to a blended portfolio
+> make things better or worse — and on which dimension?*
+
+We analyse every ticker in the universe as a candidate to blend
+**`r blend_pct`% `r bmk_label` / `r ticker_pct`% Ticker**.
+For each ticker we compute two improvement metrics relative to holding `r bmk_label` alone:
+
+| Metric | Formula | Sign convention |
+|---|---|---|
+| **delta_ret** | Ann. Return(blend) − Ann. Return(`r bmk_label`) | + = adds return |
+| **delta_dd** | MaxDD(blend) − MaxDD(`r bmk_label`) | + = *less* severe drawdown |
+| **delta_vol** | Ann. Vol(blend) − Ann. Vol(`r bmk_label`) | − = less volatile |
+
+These two primary metrics place every ticker in one of four quadrants:
+
+| Role | delta_ret | delta_dd | Interpretation |
+|---|---|---|---|
+| **Dominant** | > 0 | > 0 | Improves return AND reduces max drawdown |
+| **Enhancer** | > 0 | ≤ 0 | Lifts return but does not protect on the downside |
+| **Stabilizer** | ≤ 0 | > 0 | Pays return cost in exchange for lower drawdown |
+| **Detractor** | ≤ 0 | ≤ 0 | Worsens both dimensions — avoid |
+
+Analysis is conducted across three investment horizons:
+
+- **Full** — entire available history (~`r nrow(xts_ret)` trading days)
+- **1Y** — non-overlapping 252-day windows (`r nrow(tbl_1Y %>% distinct(n_windows))` windows)
+- **1Q** — non-overlapping 63-day windows (`r tbl_1Q$n_windows[1]` windows)
+
+```{r data-summary, echo=TRUE}
+cat(sprintf("Universe  : %d tickers\n",    n_distinct(exante_tbl$ticker)))
+cat(sprintf("Benchmark : %s\n",            params$bmk))
+cat(sprintf("Blend     : %d%% %s + %d%% Ticker\n",
+            blend_pct, params$bmk, ticker_pct))
+cat(sprintf("Date range: %s → %s  (%d trading days)\n",
+            as.character(start(xts_ret)),
+            as.character(end(xts_ret)),
+            nrow(xts_ret)))
+cat(sprintf("Thresholds: ret_eps = %.3f | risk_eps = %.3f\n",
+            params$ret_eps, params$risk_eps))
+```
+
+---
+
+## 2. The Anti-Diversification Insight
+
+Before the results, a key hypothesis inherited from the Long/Short analysis:
+
+> **Conventional diversification dogma says:** lower correlation to `r bmk_label`
+> → better drawdown protection.
+>
+> **Our finding:** *this does not hold for MaxDD in a long-only blend.*
+> Correlation ≈ 0 can *worsen* portfolio drawdown relative to high-correlation tickers.
+
+**The mechanism:**
+
+- **Corr ≈ 1** — the blended portfolio moves nearly like `r bmk_label`;
+  DD ≈ `r bmk_label`'s DD (no benefit, but no extra harm).
+- **Corr ≈ 0** — two *independent* drawdown clocks run simultaneously.
+  If the ticker also carries a large standalone DD, the portfolio suffers
+  `r bmk_label`'s DD *and* the ticker's DD at different times —
+  a blended MaxDD that is *worse* than the benchmark alone.
+- **Corr ≈ −1** — genuine hedge; MaxDD shrinks. Rare for most ETFs vs `r bmk_label`.
+
+The key driver of `delta_dd` is therefore **the ticker's own standalone MaxDD**,
+not just its correlation. Plot P2 tests this directly.
+
+---
+
+## 3. Full-Sample Classification
+
+### P1 — 2×2 Quadrant: Every Ticker Positioned
+
+```{r p1-quadrant, fig.height=9}
+print(plot_exante_quadrant(exante_tbl,
+                            horizon_sel = "full",
+                            label_n     = 8,
+                            ret_eps     = params$ret_eps,
+                            risk_eps    = params$risk_eps))
+```
+
+### P4 — Role Distribution Across Horizons
+
+```{r p4-counts, fig.height=5}
+print(plot_role_counts(exante_tbl))
+```
+
+```{r role-summary-table}
+role_tbl <- exante_tbl %>%
+  count(horizon, role) %>%
+  group_by(horizon) %>%
+  mutate(pct = scales::percent(n / sum(n), accuracy = 1)) %>%
+  ungroup() %>%
+  mutate(label = paste0(n, " (", pct, ")")) %>%
+  select(horizon, role, label) %>%
+  pivot_wider(names_from = role, values_from = label, values_fill = "0 (0%)") %>%
+  mutate(horizon = factor(horizon, levels = c("1Q", "1Y", "full"))) %>%
+  arrange(horizon)
+
+knitr::kable(role_tbl,
+             caption = sprintf("Role count (%% of universe) by horizon — %s benchmark",
+                               bmk_label),
+             align = "lcccc")
+```
+
+**Key observations from the full-sample classification:**
+
+```{r obs-text, results='asis'}
+n_dom  <- sum(tbl_full$role == "Dominant")
+n_enh  <- sum(tbl_full$role == "Enhancer")
+n_stab <- sum(tbl_full$role == "Stabilizer")
+n_det  <- sum(tbl_full$role == "Detractor")
+n_tot  <- nrow(tbl_full)
+
+cat(sprintf(
+  "- **%d tickers (%.0f%%)** are Dominant — improve both return and drawdown simultaneously.\n",
+  n_dom, n_dom / n_tot * 100))
+cat(sprintf(
+  "- **%d tickers (%.0f%%)** are Stabilizers — accept a return cost to reduce drawdown.\n",
+  n_stab, n_stab / n_tot * 100))
+cat(sprintf(
+  "- **%d tickers (%.0f%%)** are Enhancers — add return but worsen drawdown exposure.\n",
+  n_enh, n_enh / n_tot * 100))
+cat(sprintf(
+  "- **%d tickers (%.0f%%)** are Detractors — worse on both dimensions.\n",
+  n_det, n_det / n_tot * 100))
+```
+
+---
+
+## 4. Anti-Diversification Test
+
+### P2 — Correlation vs Drawdown Cost
+
+```{r p2-corr-dd, fig.height=8}
+print(plot_corr_dd(exante_tbl, horizon_sel = "full", show_loess = TRUE))
+```
+
+**Reading this plot:**
+
+- The **dotted arrow** shows what diversification dogma predicts: as correlation
+  to `r bmk_label` falls, blended drawdown should improve (positive delta_dd).
+- The **loess curve** shows the empirical relationship.
+- **Point size** = ticker's standalone MaxDD — larger = more painful own history.
+
+If the loess curve is flat or U-shaped for correlation ∈ [0, 1], that confirms
+*near-zero correlation does not guarantee DD protection in practice.*
+The mechanism is visible in the colour coding — Detractors clustered at low
+correlation tend to be large points (high standalone DD).
+
+---
+
+## 5. Horizon Sensitivity
+
+### P3 — Role Stability Across 1Q / 1Y / Full
+
+```{r p3-heatmap, fig.height=11}
+print(plot_exante_heatmap(exante_tbl, sort_by = "role_full"))
+```
+
+Tickers whose role **does not change** across all three horizons are the most
+reliable candidates for strategic allocation decisions against `r bmk_label`.
+Tickers that flip between Enhancer and Stabilizer are horizon-sensitive and
+require tactical judgment on the investment period.
+
+### P6 — Consistency Within the 1Q Horizon
+
+```{r p6-stability, fig.height=8}
+print(plot_horizon_stability(exante_tbl, horizon_sel = "1Q", top_n = 32))
+```
+
+A bar reaching 100% means the ticker played its full-sample role in *every*
+single quarter. A bar near 50% signals a coin-flip — the role alternates with
+market regimes.
+
+---
+
+## 6. The Vol-DD Dissociation
+
+### P5 — Does Vol Reduction Translate to DD Reduction?
+
+```{r p5-vol-dd, fig.height=8}
+print(plot_vol_dd_tradeoff(exante_tbl, horizon_sel = "full"))
+```
+
+The dashed diagonal represents the theoretical case where MaxDD shrinks in
+exact proportion to volatility reduction.
+Points **below** the diagonal reveal the dissociation: the ticker reduces
+annualised volatility (a conventional "diversification benefit") but *fails* to
+reduce — or actively worsens — the portfolio's maximum drawdown vs `r bmk_label`.
+
+These are the most dangerous tickers from a client-experience perspective:
+they appear safe on vol-based metrics (Sharpe, tracking error) but deliver the
+full force of drawdown episodes.
+
+---
+
+## 7. Asset Class Breakdown
+
+```{r asset-class-table}
+ac_tbl <- tbl_full %>%
+  filter(!is.na(asset_class)) %>%
+  count(asset_class, role) %>%
+  group_by(asset_class) %>%
+  mutate(pct = scales::percent(n / sum(n), accuracy = 1)) %>%
+  ungroup() %>%
+  mutate(label = paste0(n, " (", pct, ")")) %>%
+  select(asset_class, role, label) %>%
+  pivot_wider(names_from = role, values_from = label, values_fill = "—") %>%
+  arrange(asset_class)
+
+knitr::kable(ac_tbl,
+             caption = sprintf("Role distribution by asset class — %s benchmark (full sample)",
+                               bmk_label),
+             align = "lcccc")
+```
+
+```{r pf-function-table}
+pf_tbl <- tbl_full %>%
+  filter(!is.na(pf_function)) %>%
+  count(pf_function, role) %>%
+  group_by(pf_function) %>%
+  mutate(pct = scales::percent(n / sum(n), accuracy = 1)) %>%
+  ungroup() %>%
+  mutate(label = paste0(n, " (", pct, ")")) %>%
+  select(pf_function, role, label) %>%
+  pivot_wider(names_from = role, values_from = label, values_fill = "—") %>%
+  arrange(pf_function)
+
+knitr::kable(pf_tbl,
+             caption = sprintf("Role distribution by portfolio function — %s benchmark (full sample)",
+                               bmk_label),
+             align = "lcccc")
+```
+
+---
+
+## 8. Full Results Table
+
+```{r full-table}
+tbl_full %>%
+  arrange(role, desc(delta_dd)) %>%
+  mutate(
+    corr_full   = round(corr_full, 2),
+    delta_ret   = scales::percent(delta_ret,   accuracy = 0.1),
+    delta_dd    = scales::percent(delta_dd,    accuracy = 0.1),
+    delta_vol   = scales::percent(delta_vol,   accuracy = 0.1),
+    dd_tick     = scales::percent(dd_tick,     accuracy = 0.1),
+    ret_tick    = scales::percent(ret_tick,    accuracy = 0.1),
+    consistency = scales::percent(consistency, accuracy = 1)
+  ) %>%
+  select(ticker, role, corr_full, delta_ret, delta_dd, delta_vol,
+         ret_tick, dd_tick, consistency, asset_class, pf_function) %>%
+  knitr::kable(
+    caption = sprintf("Full-sample Exante classification — %s benchmark, all tickers",
+                      bmk_label),
+    align = "llrrrrrrrlll"
+  )
+```
+
+---
+
+## 9. Methodology Notes
+
+**Blend construction:**
+Daily returns: `R_blend = {r blend_pct}% × R_{r bmk_label} + {r ticker_pct}% × R_ticker`.
+The blend weight `w_blend` is a parameter; setting it to 0.3 / 0.7 / etc. traces
+an efficient frontier between pure `r bmk_label` and pure ticker.
+
+**Annualised return (sub-period horizons):**
+For 1Q windows (63 days), the period return is scaled by `252 / 63 = 4` to annualise.
+This extrapolation is aggressive for short windows; the *median across all windows*
+is used to smooth noise.
+
+**MaxDD definition:**
+`MaxDD = min(Wealth_t / cummax(Wealth) − 1)` over the window.
+Values ≤ 0; `delta_dd > 0` means the blend had a *less negative* (shallower) MaxDD.
+
+**Role classification thresholds:**
+Neutral zone = ±`r params$ret_eps * 100` pp/year for `delta_ret`,
+±`r params$risk_eps * 100` pp for `delta_dd`.
+
+**Consistency score:**
+Fraction of sub-period windows where the ticker's role matched its full-sample role.
+1.0 = perfectly stable; 0.5 = regime-alternating.
+
+**To reproduce or change benchmark:**
+```r
+render_exante_report(bmk = "AGG")          # Fixed income benchmark
+render_exante_report(bmk = "QQQ")          # Nasdaq benchmark
+render_exante_report(bmk = "GLD", w_blend = 0.3)  # Gold at 30% weight
+```

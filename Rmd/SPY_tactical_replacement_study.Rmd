@@ -1,0 +1,1200 @@
+---
+title: "SPY Tactical Replacement Study"
+subtitle: "Cycle Amplifiers, Sector Archetypes & Factor ETFs — Full Equity Universe Screen"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    toc_depth: 2
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    latex_engine: xelatex
+---
+
+<style>
+.insight-box {
+  background-color: #f0f4f8;
+  border-left: 4px solid #2c3e50;
+  padding: 10px 16px;
+  margin: 16px 0;
+  border-radius: 0 4px 4px 0;
+}
+.finding-box {
+  background-color: #eafaf1;
+  border-left: 4px solid #27ae60;
+  padding: 10px 16px;
+  margin: 16px 0;
+  border-radius: 0 4px 4px 0;
+}
+.warning-box {
+  background-color: #fef9e7;
+  border-left: 4px solid #f39c12;
+  padding: 10px 16px;
+  margin: 16px 0;
+  border-radius: 0 4px 4px 0;
+}
+h2 { border-bottom: 2px solid #2c3e50; padding-bottom: 4px; }
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(tidyverse)
+library(xts)
+library(PerformanceAnalytics)
+library(scales)
+library(patchwork)
+library(here)
+library(knitr)
+library(kableExtra)
+
+# PerformanceAnalytics masks dplyr::select — restore
+select <- dplyr::select
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+# ── Sources (spy_dd_regime_rel.R auto-loads spy_dd_regime.R + regime_multi_ticker.R)
+source(here("scripts/00_init_universe.R"))
+source(here("scripts_spy_dd_regime/spy_dd_regime_rel.R"))
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+MASTER   <- "SPY"
+T_FALL   <- 0.10
+T_CRUISE <- 0.05
+RHO_MIN  <- 0.75   # Corr-Fail threshold (mirrors KF2 L/S pair screen)
+
+# ── Regime table ──────────────────────────────────────────────────────────────
+rt <- build_regime_table(xts_ret[, MASTER], T_FALL, T_CRUISE)
+
+# ── Equity universe: exclude SPY, EUR-hedged (dot suffix), IBIT (too short) ──
+equity_tickers <- etf_metadata %>%
+  filter(asset_class == "Equity",
+         !grepl("\\.", ticker),
+         ticker != MASTER,
+         ticker != "IBIT") %>%
+  pull(ticker) %>%
+  intersect(colnames(xts_ret))
+```
+
+```{r screen-engine, cache=TRUE}
+# ── Screening function: regime archetype per ticker ───────────────────────────
+.screen_ticker <- function(tk, xts_ret, rt, master = "SPY") {
+  tk_r  <- xts_ret[, tk]
+  spy_r <- xts_ret[, master]
+
+  # Align to common non-NA period
+  both  <- which(!is.na(as.numeric(tk_r)) & !is.na(as.numeric(spy_r)))
+  if (length(both) < 252) return(NULL)
+  r_tk  <- as.numeric(tk_r)[both]
+  r_spy <- as.numeric(spy_r)[both]
+
+  spread <- r_tk - r_spy
+  rho    <- cor(r_tk, r_spy)
+  ir     <- if (sd(spread) > 0) (mean(spread) * 252) / (sd(spread) * sqrt(252)) else NA_real_
+  max_dd <- -as.numeric(maxDrawdown(tk_r))   # stored negative for display
+
+  # Per-episode outperf type + alpha
+  ep_df <- rt %>%
+    rowwise() %>%
+    mutate(
+      raw_ret = .period_ret(tk_r, xmin, xmax),
+      spy_ret = period_return,
+      alpha   = raw_ret - spy_ret,
+      type    = .outperf_type(raw_ret, spy_ret, alpha)
+    ) %>%
+    ungroup()
+
+  # Modal type + avg alpha per regime
+  smry <- ep_df %>%
+    group_by(regime) %>%
+    summarise(
+      modal_type = names(sort(table(type), decreasing = TRUE))[1],
+      avg_alpha  = mean(alpha, na.rm = TRUE),
+      .groups    = "drop"
+    )
+
+  get_val <- function(reg, col) {
+    r <- smry %>% filter(regime == reg)
+    if (nrow(r) == 0) return(NA)
+    r[[col]]
+  }
+
+  tibble(
+    ticker     = tk,
+    rho        = rho,
+    ir         = ir,
+    max_dd     = max_dd,
+    fall_type  = get_val("Fall",          "modal_type"),
+    fall_alpha = get_val("Fall",          "avg_alpha"),
+    rec_type   = get_val("Recovery",      "modal_type"),
+    rec_alpha  = get_val("Recovery",      "avg_alpha"),
+    con_type   = get_val("Consolidation", "modal_type"),
+    con_alpha  = get_val("Consolidation", "avg_alpha")
+  )
+}
+
+screen_raw <- map_dfr(equity_tickers, .screen_ticker,
+                      xts_ret = xts_ret, rt = rt)
+
+# ── Archetype classification ──────────────────────────────────────────────────
+screen_tbl <- screen_raw %>%
+  left_join(
+    etf_metadata %>% select(ticker, name, asset_class, sub_block, pf_function),
+    by = "ticker"
+  ) %>%
+  mutate(
+    corr_fail = rho < RHO_MIN,
+    archetype = case_when(
+      !corr_fail &
+        fall_type == "LOSS"                    &
+        rec_type  == "ALPHA"                   &
+        con_type  == "ALPHA"                   ~ "Cycle Amplifier",
+
+      !corr_fail &
+        fall_type == "LOSS"                    &
+        rec_type  == "ALPHA"                   &
+        con_type  == "LAG"                     ~ "Recovery Sprinter",
+
+      !corr_fail &
+        fall_type %in% c("STABLE", "HEDGE")    &
+        rec_type  == "LAG"                     &
+        con_type  %in% c("ALPHA", "LAG")       ~ "Defensive Burden",
+
+      !corr_fail &
+        fall_type == "LOSS"                    &
+        rec_type  == "LAG"                     ~ "All-Regime Drag",
+
+      corr_fail                                ~ "Corr-Fail",
+      TRUE                                     ~ "Other"
+    )
+  ) %>%
+  arrange(desc(ir))
+```
+
+---
+
+## 1. Overview
+
+<div class="insight-box">
+**Question:** Across the full equity universe, which ETFs can serve as a tactical
+SPY replacement or enhancement — and how do they behave across the three market regimes?
+
+**Answer in one finding:** The cycle amplifier pattern (LOSS in Fall → ALPHA in Recovery →
+ALPHA in Consolidation) is exclusive to **three tickers** in the 96-ticker Sovereign Universe:
+SMH, XLK, and QQQ. No sector, factor, or regional equity ETF reproduces it.
+</div>
+
+This study screens every equity ticker in the Sovereign Universe against SPY across the
+three-regime framework (Fall / Recovery / Consolidation). For each ticker we compute:
+
+- **IR** — Information Ratio of the daily excess return spread vs SPY
+- **ρ** — Full-history Pearson correlation vs SPY
+- **MaxDD** — Standalone maximum drawdown
+- **Regime archetype** — The modal outperformance type in each regime phase
+
+The screen covers **`r length(equity_tickers)` equity tickers** from the Sovereign Universe,
+spanning `r format(start(xts_ret), "%b %Y")` to `r format(end(xts_ret), "%b %Y")`.
+
+---
+
+## 2. Regime Framework
+
+The SPY regime engine partitions history into three phases:
+
+| Regime | Definition |
+|--------|------------|
+| **Fall** | SPY drawdown from recent peak ≥ `r scales::percent(T_FALL)` |
+| **Recovery** | After a Fall — drawdown between 0 and `r scales::percent(T_FALL)`, returning to peak |
+| **Consolidation** | All other periods — new-high territory or minor pullbacks < `r scales::percent(T_FALL)` |
+
+For each ticker × regime episode, the outperformance type is classified as:
+
+| Type | Condition | Meaning |
+|------|-----------|---------|
+| **HEDGE** | α > 0, abs > 0, SPY < 0 | Ticker rose while SPY fell |
+| **STABLE** | α > 0, abs < 0, SPY < 0 | Both fell — ticker fell less |
+| **ALPHA** | α > 0, SPY > 0 | Both rose — ticker rose more |
+| **LAG** | α < 0, SPY > 0 | Underperformed rising SPY |
+| **LOSS** | α < 0, SPY < 0 | Both fell — ticker fell worse |
+
+The **modal type** across all episodes of a given regime is used to characterise each
+ticker. The **average alpha** quantifies the magnitude.
+
+```{r regime-episodes, fig.height=4}
+rt %>%
+  count(regime) %>%
+  mutate(regime = factor(regime, levels = names(REGIME_PAL))) %>%
+  ggplot(aes(x = regime, y = n, fill = regime)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.4, fontface = "bold", size = 4) +
+  scale_fill_manual(values = REGIME_PAL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  theme_minimal(base_size = 12) +
+  theme(axis.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        plot.title = element_text(face = "bold")) +
+  labs(title = "Regime Episode Count",
+       subtitle = sprintf("Fall ≥%.0f%%  |  %s–%s",
+                          T_FALL * 100,
+                          format(min(rt$xmin), "%b %Y"),
+                          format(max(rt$xmax), "%b %Y")))
+```
+
+---
+
+## 3. Full Equity Screen
+
+```{r full-screen-table}
+screen_tbl %>%
+  mutate(
+    ir      = round(ir, 2),
+    rho     = round(rho, 3),
+    max_dd  = scales::percent(max_dd, accuracy = 0.1),
+    fall    = sprintf("%s  %s", fall_type,
+                      scales::percent(fall_alpha, accuracy = 0.1, style_positive = "plus")),
+    rec     = sprintf("%s  %s", rec_type,
+                      scales::percent(rec_alpha,  accuracy = 0.1, style_positive = "plus")),
+    con     = sprintf("%s  %s", con_type,
+                      scales::percent(con_alpha,  accuracy = 0.1, style_positive = "plus")),
+    corr_flag = if_else(corr_fail, "✗", "")
+  ) %>%
+  select(Ticker = ticker, Name = name, Archetype = archetype,
+         IR = ir, ρ = rho, `Corr?` = corr_flag, MaxDD = max_dd,
+         Fall = fall, Recovery = rec, Consolidation = con) %>%
+  kable(
+    caption = sprintf(
+      "Full equity screen — %d tickers vs SPY  |  Fall ≥%.0f%%  |  ✗ = Corr-Fail (ρ < %.2f)",
+      nrow(screen_tbl), T_FALL * 100, RHO_MIN
+    ),
+    align = c("l","l","l","r","r","c","r","l","l","l")
+  ) %>%
+  kable_styling(font_size = 9, full_width = TRUE) %>%
+  row_spec(which(screen_tbl$archetype == "Cycle Amplifier"),
+           bold = TRUE, background = "#eafaf1") %>%
+  row_spec(which(screen_tbl$archetype == "Recovery Sprinter"),
+           background = "#fef9e7") %>%
+  row_spec(which(screen_tbl$corr_fail),
+           color = "grey60")
+```
+
+<div class="finding-box">
+**Screen summary:** `r sum(screen_tbl$archetype == "Cycle Amplifier")` Cycle Amplifiers  |
+`r sum(screen_tbl$archetype == "Recovery Sprinter")` Recovery Sprinters  |
+`r sum(screen_tbl$archetype == "Defensive Burden")` Defensive Burden  |
+`r sum(screen_tbl$archetype == "All-Regime Drag")` All-Regime Drag  |
+`r sum(screen_tbl$corr_fail)` Corr-Fail (ρ < `r RHO_MIN`)
+</div>
+
+---
+
+## 4. Cycle Amplifiers — The Evergreen Pattern
+
+<div class="finding-box">
+**Pattern definition:** LOSS in Fall → ALPHA in Recovery → ALPHA in Consolidation.
+
+These tickers **amplify** SPY's cycle in both directions. They fall harder than SPY in
+downturns and recover faster and grind higher in every other phase.
+**Never use them as downside protection.** They are cycle amplifiers, not hedges.
+</div>
+
+### 4.1 The Three-Gate Requirement
+
+The Evergreen pattern requires **three conditions simultaneously**:
+
+1. **β > 1 vs SPY** — amplifies moves in both directions (necessary for LOSS in Fall)
+2. **ρ > 0.82 vs SPY** — tracks SPY regime phases closely enough to produce consistent ALPHA
+3. **Structural positive alpha** — net positive drift above SPY over the full cycle
+
+This combination exists only in **US tech / secular growth** within the 96-ticker universe.
+High-β tickers without structural alpha (EM, Small Caps, Biotech) produce LOSS in Fall
+but LAG in Recovery. Defensive tickers with positive structural alpha produce STABLE in
+Fall but LAG in Recovery. Only US tech satisfies all three simultaneously.
+
+### 4.2 Confirmed Evergreens
+
+```{r evergreen-table}
+screen_tbl %>%
+  filter(archetype == "Cycle Amplifier") %>%
+  mutate(
+    ir     = round(ir, 2),
+    rho    = round(rho, 3),
+    max_dd = scales::percent(max_dd, accuracy = 0.1),
+    fall   = sprintf("%s  (%s)", fall_type,
+                     scales::percent(fall_alpha, accuracy = 0.1, style_positive = "plus")),
+    rec    = sprintf("%s  (%s)", rec_type,
+                     scales::percent(rec_alpha,  accuracy = 0.1, style_positive = "plus")),
+    con    = sprintf("%s  (%s)", con_type,
+                     scales::percent(con_alpha,  accuracy = 0.1, style_positive = "plus"))
+  ) %>%
+  select(Ticker = ticker, Name = name, IR = ir, ρ = rho, MaxDD = max_dd,
+         Fall = fall, Recovery = rec, Consolidation = con) %>%
+  kable(caption = "Confirmed Cycle Amplifiers") %>%
+  kable_styling(full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+```{r evergreen-heatmap, fig.height=6}
+evergreen_tickers <- screen_tbl %>%
+  filter(archetype == "Cycle Amplifier") %>%
+  pull(ticker)
+
+if (length(evergreen_tickers) > 0)
+  print(plot_regime_rel_heatmap(xts_ret, evergreen_tickers, master = MASTER,
+                                t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+```{r evergreen-summary, fig.height=5}
+if (length(evergreen_tickers) > 0)
+  print(plot_regime_rel_summary(xts_ret, evergreen_tickers, master = MASTER,
+                                t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+### 4.3 Near-Miss: Conditional Candidates
+
+```{r conditional-table}
+# Tickers that are LOSS/ALPHA but con_type is LAG by a small margin
+cond_tickers <- screen_tbl %>%
+  filter(!corr_fail,
+         fall_type == "LOSS",
+         rec_type  == "ALPHA",
+         con_type  == "LAG",
+         con_alpha > -0.015)   # within 1.5pp of ALPHA
+
+if (nrow(cond_tickers) > 0) {
+  cond_tickers %>%
+    mutate(
+      ir     = round(ir, 2),
+      rho    = round(rho, 3),
+      max_dd = scales::percent(max_dd, accuracy = 0.1),
+      fall   = sprintf("%s  (%s)", fall_type,
+                       scales::percent(fall_alpha, accuracy = 0.1, style_positive = "plus")),
+      rec    = sprintf("%s  (%s)", rec_type,
+                       scales::percent(rec_alpha,  accuracy = 0.1, style_positive = "plus")),
+      con    = sprintf("%s  (%s)", con_type,
+                       scales::percent(con_alpha,  accuracy = 0.1, style_positive = "plus"))
+    ) %>%
+    select(Ticker = ticker, Name = name, IR = ir, ρ = rho, MaxDD = max_dd,
+           Fall = fall, Recovery = rec, Consolidation = con) %>%
+    kable(caption = "Conditional candidates — LOSS/ALPHA with Consolidation within 1.5pp of ALPHA") %>%
+    kable_styling(full_width = FALSE)
+} else {
+  cat("No conditional candidates within threshold.")
+}
+```
+
+<div class="warning-box">
+**AIQ (Global X AI & Big Data):** shows LOSS/ALPHA/ALPHA but its Consolidation alpha averages
+−1.0% — below zero but within noise. It qualifies as a cycle amplifier *in spirit* but lacks
+the structural Consolidation edge of SMH/XLK/QQQ. Appropriate only as a small satellite, not
+a structural replacement.
+</div>
+
+---
+
+## 5. US Sector Archetypes — 11 GICS Sectors
+
+```{r sector-setup}
+sector_tickers <- c("XLK","XLC","XLV","XLF","XLI","XLP","XLY","XLE","XLB","XLRE","XLU")
+sector_tickers <- intersect(sector_tickers, colnames(xts_ret))
+
+sector_screen <- screen_tbl %>%
+  filter(ticker %in% sector_tickers) %>%
+  arrange(desc(ir))
+```
+
+The 11 GICS sector ETFs divide into **five distinct behavioral archetypes** based on
+their modal pattern across Fall / Recovery / Consolidation:
+
+```{r sector-archetype-table}
+sector_screen %>%
+  mutate(
+    ir       = round(ir, 2),
+    rho      = round(rho, 3),
+    max_dd   = scales::percent(max_dd, accuracy = 0.1),
+    fall     = sprintf("%s (%s)", fall_type,
+                       scales::percent(fall_alpha, accuracy = 0.1, style_positive = "plus")),
+    rec      = sprintf("%s (%s)", rec_type,
+                       scales::percent(rec_alpha,  accuracy = 0.1, style_positive = "plus")),
+    con      = sprintf("%s (%s)", con_type,
+                       scales::percent(con_alpha,  accuracy = 0.1, style_positive = "plus")),
+    Archetype = case_when(
+      ticker == "XLK"                             ~ "Cycle Amplifier",
+      ticker %in% c("XLC","XLY")                  ~ "Recovery Sprinter",
+      ticker %in% c("XLP","XLU","XLV","XLRE")     ~ "Defensive Burden",
+      ticker %in% c("XLF","XLI")                  ~ "Late Cyclical",
+      ticker == "XLB"                             ~ "All-Regime Drag",
+      ticker == "XLE"                             ~ "Macro Satellite",
+      TRUE                                        ~ archetype
+    )
+  ) %>%
+  select(Ticker = ticker, Name = name, Archetype,
+         IR = ir, ρ = rho, MaxDD = max_dd,
+         Fall = fall, Recovery = rec, Consolidation = con) %>%
+  kable(caption = "US Sector ETF regime archetypes — sorted by IR vs SPY") %>%
+  kable_styling(font_size = 10, full_width = TRUE) %>%
+  row_spec(which(sector_screen$ticker == "XLK"),
+           bold = TRUE, background = "#eafaf1") %>%
+  row_spec(which(sector_screen$ticker %in% c("XLC","XLY")),
+           background = "#fef9e7") %>%
+  row_spec(which(sector_screen$ticker == "XLB"),
+           color = "#7B1010")
+```
+
+### Archetype Descriptions
+
+**Cycle Amplifier — XLK only**
+The only sector that delivers structural alpha above SPY in *both* Recovery and
+Consolidation. Semiconductor/cloud/software earnings compound faster than the market
+cycle. β > 1 makes it a LOSS in Fall, but the structural drift more than compensates.
+
+**Recovery Sprinters — XLC, XLY**
+These amplify Recovery (ALPHA) but fade in Consolidation (LAG). Consumer Discretionary
+(Amazon, Tesla) and Communication Services (Meta, Alphabet) sprint hard off the
+bottom driven by consumer spending re-acceleration. Once momentum normalises, the media
+and telecom components drag. *Not structural alpha — it is mean-reversion beta.*
+
+**Defensive Burden — XLP, XLU, XLV, XLRE**
+Protect in Fall (STABLE), pay for it heavily in Recovery (LAG). The Fall cushion is
+fully — and in the case of XLP and XLU, more than fully — clawed back in Recovery.
+
+The **XLP/XLU protection premium** is a tactical illusion:
+
+| | Fall α | Recovery α | Net (Fall + Recovery) |
+|-|--------|------------|-----------------------|
+| XLP Staples   | +9.6% | −15.6% | **−6.0%** |
+| XLU Utilities | +8.6% | −17.7% | **−9.1%** |
+
+XLV (Healthcare) has the same structure with a 6.7% Fall cushion and −14.8%
+Recovery lag. Despite being marketed as "defensive", it is a negative-IR sector
+across the full cycle (IR = −0.33).
+
+**Late Cyclicals — XLF, XLI**
+Mild or neutral Fall (STABLE with near-zero alpha), lag in Recovery, recover
+modestly in Consolidation. XLF is the most interesting: −8.9% in Recovery
+(credit cycle tightening) but +3.4% in Consolidation (yield curve steepening).
+XLI is essentially SPY with a small permanent haircut — near-zero alpha in every phase.
+
+**All-Regime Drag — XLB**
+Materials fall harder than SPY in Fall, lag in Recovery, and lag in Consolidation.
+No regime is favorable. Commodity input cost cycles dominate over earnings.
+
+**Macro Satellite — XLE**
+ρ = 0.61. Energy does not run on SPY drawdown cycles — it runs on oil price cycles.
+The +5.9% Fall alpha reflects supply-shock episodes (2022) and is not repeatable as a
+hedge. SPY regime classification is structurally unreliable for XLE.
+
+```{r sector-heatmap, fig.height=9}
+print(plot_regime_rel_heatmap(xts_ret, sector_tickers, master = MASTER,
+                              t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+```{r sector-summary, fig.height=6}
+print(plot_regime_rel_summary(xts_ret, sector_tickers, master = MASTER,
+                              t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+---
+
+## 6. Factor & Smart-Beta ETFs
+
+```{r factor-setup}
+factor_tickers <- c("QUAL","MTUM","USMV","VTV","DGRW","COWZ","ACWV")
+factor_tickers <- intersect(factor_tickers, colnames(xts_ret))
+
+factor_screen <- screen_tbl %>%
+  filter(ticker %in% factor_tickers) %>%
+  arrange(desc(ir))
+```
+
+```{r factor-table}
+factor_screen %>%
+  mutate(
+    ir     = round(ir, 2),
+    rho    = round(rho, 3),
+    max_dd = scales::percent(max_dd, accuracy = 0.1),
+    fall   = sprintf("%s (%s)", fall_type,
+                     scales::percent(fall_alpha, accuracy = 0.1, style_positive = "plus")),
+    rec    = sprintf("%s (%s)", rec_type,
+                     scales::percent(rec_alpha,  accuracy = 0.1, style_positive = "plus")),
+    con    = sprintf("%s (%s)", con_type,
+                     scales::percent(con_alpha,  accuracy = 0.1, style_positive = "plus")),
+    Factor = case_when(
+      ticker == "QUAL"  ~ "Quality",
+      ticker == "MTUM"  ~ "Momentum",
+      ticker == "USMV"  ~ "Min Volatility",
+      ticker == "VTV"   ~ "Value",
+      ticker == "DGRW"  ~ "Dividend Growth",
+      ticker == "COWZ"  ~ "Cash Flow",
+      ticker == "ACWV"  ~ "Min Vol (Global)",
+      TRUE              ~ sub_block
+    )
+  ) %>%
+  select(Ticker = ticker, Factor, IR = ir, ρ = rho, MaxDD = max_dd,
+         Fall = fall, Recovery = rec, Consolidation = con) %>%
+  kable(caption = "Factor & smart-beta ETFs — regime archetypes vs SPY") %>%
+  kable_styling(font_size = 10, full_width = TRUE)
+```
+
+**No factor ETF clears the Evergreen screen.** All factor archetypes map onto patterns
+already identified in the sector analysis:
+
+- **QUAL** (ρ = 0.984): The highest correlation in the universe outside SPY itself. It is
+  SPY minus alpha — a structural underperformer in every regime (IR = −0.20). The quality
+  premium did not manifest vs SPY over this history.
+
+- **MTUM** (Momentum): The most structurally interesting factor. LOSS in Fall (momentum
+  crashes in sharp reversals), LAG in Recovery (beaten-down reversals steal from momentum
+  names), then ALPHA in Consolidation (trending markets reward the factor). **Anti-cycle
+  timing** — worst precisely when Recovery begins, best when volatility is absent.
+
+- **VTV / COWZ** (Value / Cash Flow): Map onto the Late Cyclical archetype. STABLE or
+  neutral in Fall, LAG in Recovery, modest Consolidation alpha. Value does not sprint off
+  the bottom.
+
+- **DGRW / USMV** (Dividend Growth / Min Vol): Map onto Defensive Burden. USMV in
+  particular is the factor version of XLP — strong Fall protection (+5.5%), severe Recovery
+  lag (−9.9%).
+
+**Equal Weight S&P 500 (RSP) — not needed.** Equal-weight is structurally long
+value/cyclicals and short mega-cap tech. It would show STABLE/LAG/LAG — already captured
+by VTV + the sector spread in the universe. It introduces no new archetype.
+
+```{r factor-heatmap, fig.height=8}
+print(plot_regime_rel_heatmap(xts_ret, factor_tickers, master = MASTER,
+                              t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+```{r factor-summary, fig.height=6}
+print(plot_regime_rel_summary(xts_ret, factor_tickers, master = MASTER,
+                              t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+---
+
+## 7. Portfolio Implications
+
+<div class="finding-box">
+**The master insight:** No equity ETF in the 96-ticker Sovereign Universe delivers
+STABLE-in-Fall AND ALPHA-in-Recovery. The tradeoff is structural:
+
+- Sectors that protect in Fall are defensives (low β) → they guarantee Recovery LAG.
+- Sectors that amplify Recovery are growth (high β) → they guarantee Fall LOSS.
+
+**XLK escapes the tradeoff** only because it has structural alpha above SPY *across
+the full cycle* — not because it broke the β relationship.
+</div>
+
+### Key Rules from This Study
+
+**1. Cycle Amplifiers are growth allocations only**
+SMH, XLK, QQQ belong in the Growth sleeve of the SAA. Their LOSS in Fall is the *entry
+price* for the Recovery/Consolidation ALPHA. Removing them tactically in Fall means missing
+the sharpest part of the Recovery.
+
+**2. The defensive trap (XLP / XLU)**
+The Fall cushion of Staples (+9.6%) and Utilities (+8.6%) appears attractive.
+The net of Fall + Recovery is −6.0% and −9.1% respectively. A full-cycle tactical rotation
+into these sectors destroys more value in Recovery than it saves in Fall.
+
+**3. XLV is not a hedge**
+Healthcare is commonly labelled defensive. It protects in Fall (+6.7%) but gives back
+−14.8% in Recovery. Over a full cycle its IR is −0.33. Use it as a satellite, never as
+a defensive overlay.
+
+**4. MTUM needs cycle awareness**
+Momentum (IR = −0.09, better than most factors) delivers its ALPHA in Consolidation —
+the longest and most persistent regime phase. But it crashes in Fall and lags in Recovery.
+TAA rotation into MTUM should trigger *after* Recovery is confirmed, not during it.
+
+**5. XLF is the best sector for late-cycle positioning**
+The only sector with meaningful positive Consolidation alpha (+3.4%) while absorbing
+modest Fall losses. Yield curve steepening in Consolidation benefits bank net interest
+margins. Consider as a Consolidation-phase overweight in tactical allocation.
+
+**6. SAA implications — the existing portfolio is correct**
+The current SAA includes QQQ (5%) and XLK (5%) as Core-Growth satellites — both confirmed
+Evergreens. The screen finds no additional sector or factor ETF that warrants inclusion as
+a structural SPY replacement or enhancement. The universe is exhaustive.
+
+```{r archetype-roster-table}
+archetype_order <- c("Cycle Amplifier","Recovery Sprinter","Defensive Burden",
+                     "Late Cyclical","All-Regime Drag","Corr-Fail","Other")
+
+screen_tbl %>%
+  mutate(archetype = factor(archetype, levels = archetype_order)) %>%
+  arrange(archetype, desc(ir)) %>%
+  group_by(archetype) %>%
+  summarise(
+    Tickers = paste(ticker, collapse = ", "),
+    N       = n(),
+    .groups = "drop"
+  ) %>%
+  rename(Archetype = archetype, `# Tickers` = N) %>%
+  kable(caption = "Tickers by regime archetype — sorted by IR within each group") %>%
+  kable_styling(font_size = 10, full_width = TRUE) %>%
+  column_spec(2, width = "60%")
+```
+
+```{r archetype-summary-chart, fig.height=5}
+archetype_order <- c("Cycle Amplifier","Recovery Sprinter","Defensive Burden",
+                     "Late Cyclical","All-Regime Drag","Corr-Fail","Other")
+archetype_pal <- c(
+  "Cycle Amplifier"  = "#27ae60",
+  "Recovery Sprinter"= "#f39c12",
+  "Defensive Burden" = "#2980b9",
+  "Late Cyclical"    = "#8e44ad",
+  "All-Regime Drag"  = "#c0392b",
+  "Corr-Fail"        = "#95a5a6",
+  "Other"            = "#bdc3c7"
+)
+
+screen_tbl %>%
+  mutate(archetype = factor(archetype, levels = archetype_order)) %>%
+  count(archetype) %>%
+  ggplot(aes(x = archetype, y = n, fill = archetype)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.4, fontface = "bold", size = 4.5) +
+  scale_fill_manual(values = archetype_pal) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title         = element_blank(),
+    axis.text.x        = element_text(face = "bold", size = 10),
+    panel.grid.major.x = element_blank(),
+    plot.title         = element_text(face = "bold", size = 13)
+  ) +
+  labs(
+    title    = sprintf("Equity Universe Regime Archetypes — %d tickers vs SPY",
+                       nrow(screen_tbl)),
+    subtitle = sprintf("Fall ≥%.0f%%  |  Corr-Fail = ρ < %.2f  |  %s–%s",
+                       T_FALL * 100, RHO_MIN,
+                       format(start(xts_ret), "%b %Y"),
+                       format(end(xts_ret), "%b %Y"))
+  )
+```
+
+---
+
+*Study date: `r Sys.Date()`  |  Universe: Sovereign Universe `r nrow(etf_metadata)` tickers
+|  Screen: `r length(equity_tickers)` equity tickers vs SPY  |  Fall threshold: `r scales::percent(T_FALL)`*
+
+---
+
+# Part II — URTH as Benchmark
+
+```{r urth-setup}
+MASTER2  <- "URTH"
+rt_urth  <- build_regime_table(xts_ret[, MASTER2], T_FALL, T_CRUISE)
+
+equity_tickers2 <- etf_metadata %>%
+  filter(asset_class == "Equity",
+         !grepl("\\.", ticker),
+         ticker != MASTER2,
+         ticker != "IBIT") %>%
+  pull(ticker) %>%
+  intersect(colnames(xts_ret))
+```
+
+```{r urth-screen-engine, cache=TRUE}
+screen_raw2 <- map_dfr(equity_tickers2, .screen_ticker,
+                       xts_ret = xts_ret, rt = rt_urth, master = MASTER2)
+
+screen_tbl2 <- screen_raw2 %>%
+  left_join(
+    etf_metadata %>% select(ticker, name, asset_class, sub_block, pf_function),
+    by = "ticker"
+  ) %>%
+  mutate(
+    corr_fail = rho < RHO_MIN,
+    archetype = case_when(
+      !corr_fail &
+        fall_type == "LOSS"                    &
+        rec_type  == "ALPHA"                   &
+        con_type  == "ALPHA"                   ~ "Cycle Amplifier",
+      !corr_fail &
+        fall_type == "LOSS"                    &
+        rec_type  == "ALPHA"                   &
+        con_type  == "LAG"                     ~ "Recovery Sprinter",
+      !corr_fail &
+        fall_type %in% c("STABLE", "HEDGE")    &
+        rec_type  == "LAG"                     &
+        con_type  %in% c("ALPHA", "LAG")       ~ "Defensive Burden",
+      !corr_fail &
+        fall_type == "LOSS"                    &
+        rec_type  == "LAG"                     ~ "All-Regime Drag",
+      corr_fail                                ~ "Corr-Fail",
+      TRUE                                     ~ "Other"
+    )
+  ) %>%
+  arrange(desc(ir))
+```
+
+---
+
+## II.1 Overview
+
+<div class="insight-box">
+**Benchmark:** URTH (iShares MSCI World) replaces SPY as the reference series.
+All alpha, correlation, and regime classifications are computed **relative to URTH**.
+The regime table is rebuilt from URTH's own drawdown history using the same
+Fall ≥ `r scales::percent(T_FALL)` threshold.
+</div>
+
+URTH is a global developed-market benchmark (ρ ≈ 0.98 vs SPY over the full history).
+Its regime episodes are structurally similar to SPY's but not identical — global market
+stress sometimes diverges from US-only drawdowns.
+
+```{r urth-regime-episodes, fig.height=4}
+rt_urth %>%
+  count(regime) %>%
+  mutate(regime = factor(regime, levels = names(REGIME_PAL))) %>%
+  ggplot(aes(x = regime, y = n, fill = regime)) +
+  geom_col(width = 0.5, show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.4, fontface = "bold", size = 4) +
+  scale_fill_manual(values = REGIME_PAL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  theme_minimal(base_size = 12) +
+  theme(axis.title = element_blank(),
+        panel.grid.major.x = element_blank(),
+        plot.title = element_text(face = "bold")) +
+  labs(title = sprintf("URTH Regime Episode Count"),
+       subtitle = sprintf("Fall ≥%.0f%%  |  %s–%s",
+                          T_FALL * 100,
+                          format(min(rt_urth$xmin), "%b %Y"),
+                          format(max(rt_urth$xmax), "%b %Y")))
+```
+
+---
+
+## II.2 Full Equity Screen vs URTH
+
+```{r urth-screen-table}
+screen_tbl2 %>%
+  mutate(
+    ir      = round(ir, 2),
+    rho     = round(rho, 3),
+    max_dd  = scales::percent(max_dd, accuracy = 0.1),
+    fall    = sprintf("%s  %s", fall_type,
+                      scales::percent(fall_alpha, accuracy = 0.1, style_positive = "plus")),
+    rec     = sprintf("%s  %s", rec_type,
+                      scales::percent(rec_alpha,  accuracy = 0.1, style_positive = "plus")),
+    con     = sprintf("%s  %s", con_type,
+                      scales::percent(con_alpha,  accuracy = 0.1, style_positive = "plus")),
+    corr_flag = if_else(corr_fail, "✗", "")
+  ) %>%
+  select(Ticker = ticker, Name = name, Archetype = archetype,
+         IR = ir, ρ = rho, `Corr?` = corr_flag, MaxDD = max_dd,
+         Fall = fall, Recovery = rec, Consolidation = con) %>%
+  kable(
+    caption = sprintf(
+      "Full equity screen — %d tickers vs URTH  |  Fall ≥%.0f%%  |  ✗ = Corr-Fail (ρ < %.2f)",
+      nrow(screen_tbl2), T_FALL * 100, RHO_MIN
+    ),
+    align = c("l","l","l","r","r","c","r","l","l","l")
+  ) %>%
+  kable_styling(font_size = 9, full_width = TRUE) %>%
+  row_spec(which(screen_tbl2$archetype == "Cycle Amplifier"),
+           bold = TRUE, background = "#eafaf1") %>%
+  row_spec(which(screen_tbl2$archetype == "Recovery Sprinter"),
+           background = "#fef9e7") %>%
+  row_spec(which(screen_tbl2$corr_fail),
+           color = "grey60")
+```
+
+<div class="finding-box">
+**Screen summary vs URTH:** `r sum(screen_tbl2$archetype == "Cycle Amplifier")` Cycle Amplifiers  |
+`r sum(screen_tbl2$archetype == "Recovery Sprinter")` Recovery Sprinters  |
+`r sum(screen_tbl2$archetype == "Defensive Burden")` Defensive Burden  |
+`r sum(screen_tbl2$archetype == "All-Regime Drag")` All-Regime Drag  |
+`r sum(screen_tbl2$corr_fail)` Corr-Fail (ρ < `r RHO_MIN`)
+</div>
+
+---
+
+## II.3 Cycle Amplifiers vs URTH
+
+```{r urth-evergreen-table}
+evergreen_tickers2 <- screen_tbl2 %>%
+  filter(archetype == "Cycle Amplifier") %>%
+  pull(ticker)
+
+screen_tbl2 %>%
+  filter(archetype == "Cycle Amplifier") %>%
+  mutate(
+    ir     = round(ir, 2),
+    rho    = round(rho, 3),
+    max_dd = scales::percent(max_dd, accuracy = 0.1),
+    fall   = sprintf("%s  (%s)", fall_type,
+                     scales::percent(fall_alpha, accuracy = 0.1, style_positive = "plus")),
+    rec    = sprintf("%s  (%s)", rec_type,
+                     scales::percent(rec_alpha,  accuracy = 0.1, style_positive = "plus")),
+    con    = sprintf("%s  (%s)", con_type,
+                     scales::percent(con_alpha,  accuracy = 0.1, style_positive = "plus"))
+  ) %>%
+  select(Ticker = ticker, Name = name, IR = ir, ρ = rho, MaxDD = max_dd,
+         Fall = fall, Recovery = rec, Consolidation = con) %>%
+  kable(caption = "Confirmed Cycle Amplifiers vs URTH") %>%
+  kable_styling(full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+```{r urth-evergreen-heatmap, fig.height=6}
+if (length(evergreen_tickers2) > 0)
+  print(plot_regime_rel_heatmap(xts_ret, evergreen_tickers2, master = MASTER2,
+                                t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+```{r urth-evergreen-summary, fig.height=5}
+if (length(evergreen_tickers2) > 0)
+  print(plot_regime_rel_summary(xts_ret, evergreen_tickers2, master = MASTER2,
+                                t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+---
+
+## II.4 Sector Archetypes vs URTH
+
+```{r urth-sector-heatmap, fig.height=9}
+sector_tickers2 <- intersect(sector_tickers, colnames(xts_ret))
+print(plot_regime_rel_heatmap(xts_ret, sector_tickers2, master = MASTER2,
+                              t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+```{r urth-sector-summary, fig.height=6}
+print(plot_regime_rel_summary(xts_ret, sector_tickers2, master = MASTER2,
+                              t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+```{r urth-sector-table}
+screen_tbl2 %>%
+  filter(ticker %in% sector_tickers) %>%
+  arrange(desc(ir)) %>%
+  mutate(
+    ir     = round(ir, 2),
+    rho    = round(rho, 3),
+    max_dd = scales::percent(max_dd, accuracy = 0.1),
+    fall   = sprintf("%s (%s)", fall_type,
+                     scales::percent(fall_alpha, accuracy = 0.1, style_positive = "plus")),
+    rec    = sprintf("%s (%s)", rec_type,
+                     scales::percent(rec_alpha,  accuracy = 0.1, style_positive = "plus")),
+    con    = sprintf("%s (%s)", con_type,
+                     scales::percent(con_alpha,  accuracy = 0.1, style_positive = "plus"))
+  ) %>%
+  select(Ticker = ticker, Name = name, Archetype = archetype,
+         IR = ir, ρ = rho, MaxDD = max_dd,
+         Fall = fall, Recovery = rec, Consolidation = con) %>%
+  kable(caption = "US Sector ETF regime archetypes vs URTH — sorted by IR") %>%
+  kable_styling(font_size = 10, full_width = TRUE)
+```
+
+---
+
+## II.5 Factor & Smart-Beta ETFs vs URTH
+
+```{r urth-factor-heatmap, fig.height=8}
+factor_tickers2 <- intersect(factor_tickers, colnames(xts_ret))
+print(plot_regime_rel_heatmap(xts_ret, factor_tickers2, master = MASTER2,
+                              t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+```{r urth-factor-summary, fig.height=6}
+print(plot_regime_rel_summary(xts_ret, factor_tickers2, master = MASTER2,
+                              t_fall = T_FALL, t_cruise = T_CRUISE))
+```
+
+```{r urth-factor-table}
+screen_tbl2 %>%
+  filter(ticker %in% factor_tickers) %>%
+  arrange(desc(ir)) %>%
+  mutate(
+    ir     = round(ir, 2),
+    rho    = round(rho, 3),
+    max_dd = scales::percent(max_dd, accuracy = 0.1),
+    fall   = sprintf("%s (%s)", fall_type,
+                     scales::percent(fall_alpha, accuracy = 0.1, style_positive = "plus")),
+    rec    = sprintf("%s (%s)", rec_type,
+                     scales::percent(rec_alpha,  accuracy = 0.1, style_positive = "plus")),
+    con    = sprintf("%s (%s)", con_type,
+                     scales::percent(con_alpha,  accuracy = 0.1, style_positive = "plus"))
+  ) %>%
+  select(Ticker = ticker, Name = name, Archetype = archetype,
+         IR = ir, ρ = rho, MaxDD = max_dd,
+         Fall = fall, Recovery = rec, Consolidation = con) %>%
+  kable(caption = "Factor & smart-beta ETFs vs URTH — sorted by IR") %>%
+  kable_styling(font_size = 10, full_width = TRUE)
+```
+
+---
+
+## II.6 Summary — URTH Archetypes
+
+```{r urth-archetype-roster-table}
+archetype_order2 <- c("Cycle Amplifier","Recovery Sprinter","Defensive Burden",
+                      "Late Cyclical","All-Regime Drag","Corr-Fail","Other")
+
+screen_tbl2 %>%
+  mutate(archetype = factor(archetype, levels = archetype_order2)) %>%
+  arrange(archetype, desc(ir)) %>%
+  group_by(archetype) %>%
+  summarise(
+    Tickers = paste(ticker, collapse = ", "),
+    N       = n(),
+    .groups = "drop"
+  ) %>%
+  rename(Archetype = archetype, `# Tickers` = N) %>%
+  kable(caption = "Tickers by regime archetype vs URTH — sorted by IR within each group") %>%
+  kable_styling(font_size = 10, full_width = TRUE) %>%
+  column_spec(2, width = "60%")
+```
+
+```{r urth-archetype-summary-chart, fig.height=5}
+archetype_pal2 <- c(
+  "Cycle Amplifier"  = "#27ae60",
+  "Recovery Sprinter"= "#f39c12",
+  "Defensive Burden" = "#2980b9",
+  "Late Cyclical"    = "#8e44ad",
+  "All-Regime Drag"  = "#c0392b",
+  "Corr-Fail"        = "#95a5a6",
+  "Other"            = "#bdc3c7"
+)
+
+screen_tbl2 %>%
+  mutate(archetype = factor(archetype, levels = archetype_order2)) %>%
+  count(archetype) %>%
+  ggplot(aes(x = archetype, y = n, fill = archetype)) +
+  geom_col(width = 0.65, show.legend = FALSE) +
+  geom_text(aes(label = n), vjust = -0.4, fontface = "bold", size = 4.5) +
+  scale_fill_manual(values = archetype_pal2) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.title         = element_blank(),
+    axis.text.x        = element_text(face = "bold", size = 10),
+    panel.grid.major.x = element_blank(),
+    plot.title         = element_text(face = "bold", size = 13)
+  ) +
+  labs(
+    title    = sprintf("Equity Universe Regime Archetypes — %d tickers vs URTH",
+                       nrow(screen_tbl2)),
+    subtitle = sprintf("Fall ≥%.0f%%  |  Corr-Fail = ρ < %.2f  |  %s–%s",
+                       T_FALL * 100, RHO_MIN,
+                       format(start(xts_ret), "%b %Y"),
+                       format(end(xts_ret), "%b %Y"))
+  )
+```
+
+---
+
+*URTH screen date: `r Sys.Date()`  |  Universe: Sovereign Universe `r nrow(etf_metadata)` tickers
+|  Screen: `r length(equity_tickers2)` equity tickers vs URTH  |  Fall threshold: `r scales::percent(T_FALL)`*
+
+---
+
+## Appendix — Analytical Notes from Discovery Session
+
+*The sections below preserve the reasoning and intermediate findings produced during the
+original screening session. They document the analytical path: what was found, why the
+boundaries were drawn where they were, and which near-misses were explicitly ruled out.*
+
+---
+
+### A1. Confirmed Evergreens — Raw Screen Output
+
+**Three tickers pass all three gates across the full 61-ticker equity screen:**
+
+| Ticker | Name | IR | ρ | Fall | Recovery | Consolidation |
+|--------|------|----|---|------|----------|---------------|
+| **SMH** | Semiconductors | 0.62 | 0.82 | LOSS −7.8% | ALPHA +25.7% | ALPHA +13.4% |
+| **XLK** | Technology | 0.57 | 0.93 | LOSS −3.9% | ALPHA +16.8% | ALPHA +1.1% |
+| **QQQ** | Nasdaq 100 | 0.47 | 0.94 | LOSS −2.5% | ALPHA +12.2% | ALPHA +0.4% |
+
+**Conditional (borderline) — 1 ticker:**
+
+| Ticker | Issue | Fall | Recovery | Consolidation |
+|--------|-------|------|----------|---------------|
+| **AIQ** | Consolidation alpha is −1.0% — pattern in spirit but shallow | LOSS −2.9% | ALPHA +13.8% | ALPHA −1.0% |
+
+AIQ qualifies only if near-zero Consolidation alpha is accepted as sufficient. It is
+not a structural Evergreen: the Consolidation edge is within noise.
+
+---
+
+### A2. Why Only 3 Pass — The Anatomy of the Pattern
+
+The LOSS / ALPHA / ALPHA pattern requires three simultaneous conditions:
+
+1. **β > 1 vs SPY** — amplifies moves in both directions (necessary for LOSS in Fall)
+2. **ρ > 0.82 vs SPY** — tracks SPY regime phases closely enough to produce consistent ALPHA
+3. **Structural positive alpha** — net positive drift above SPY over the full cycle
+
+Each category of failures:
+
+| Failure mode | Examples | What breaks |
+|---|---|---|
+| High β, low ρ | EM (EWY, FXI), Biotech (XBI, IBB), Cloud (WCLD) | β amplifies but ticker diverges from SPY phases → Recovery or Consolidation LAG |
+| High β, negative structural alpha | IWM, EWY, FXI | Falls hard in Fall but LAGs in Recovery — no excess drift to capture |
+| Low β, defensive | XLU, XLP, XLV, GLD | STABLE/HEDGE in Fall, then LAG — the mirror-image pattern |
+
+The three Evergreens are **US secular growth stories with β > 1 AND positive structural
+alpha above SPY**. SMH is the purest expression: the largest LOSS in Fall (−7.8% vs SPY)
+paired with the most explosive Recovery (+25.7%) — semiconductor earnings leverage.
+
+---
+
+### A3. Notable Near-Misses and Why They Fail
+
+| Ticker | Pattern | Where it breaks |
+|--------|---------|-----------------|
+| **CIBR** | LOSS / ALPHA / LAG | No Consolidation edge — cybersecurity lacks consistent alpha above the tech benchmark |
+| **XLC** | LOSS / ALPHA / LAG | Communication Services drags in Consolidation — media and telecom dilute the growth component |
+| **ITB** | LOSS / ALPHA / LAG | Homebuilders are rate-sensitive — stall in Consolidation as rates stay elevated |
+| **IWM** | LOSS / LAG / LAG | Small caps recover slower than large-cap — no structural alpha, just beta without the drift |
+| **IPO** | LOSS / ALPHA / LAG | IPO basket has explosive Recovery but reverts once momentum fades |
+
+The Recovery Sprinter archetype (LOSS / ALPHA / LAG) is the most common near-miss.
+These tickers have the beta engine but lack the structural alpha that sustains them
+in Consolidation. **Growth beta ≠ growth alpha.**
+
+---
+
+### A4. Non-Equity Universe — Why It Was Not Screened
+
+The screen was intentionally restricted to equities vs SPY.
+
+Non-equity tickers (Fixed Income, Commodities, FX, Real Assets) are **structurally
+defined by their divergence from SPY** — that is their purpose. Screening them for the
+LOSS / ALPHA / ALPHA pattern would be a category error:
+
+| Asset class | Expected pattern | Why |
+|------------|-----------------|-----|
+| FI (IEF, TLT, AGG) | HEDGE/STABLE in Fall → LAG in Recovery | Duration rally in stress; left behind when risk-on returns |
+| GLD | HEDGE in Fall → LAG in Recovery | Canonical safe haven — the exact opposite archetype |
+| HYG | STABLE in Fall → LAG in Recovery | Semi-equity credit; ρ ≈ 0.65, β < 1 — not an amplifier |
+| VIXY | HEDGE in Fall → catastrophic LOSS in Recovery | Inverted cycle amplifier — never held long |
+
+**Conclusion:** Zero Evergreens expected or found outside equities. The search is
+complete within the scope of SPY-centric tactical allocation.
+
+---
+
+### A5. Sector Archetypes — Full Reasoning
+
+#### Archetype 1 — Cycle Amplifier: XLK only
+
+LOSS −3.9% / ALPHA +16.8% / ALPHA +1.1%  |  IR +0.57  |  ρ 0.93
+
+The only sector with structural positive alpha above SPY in *both* Recovery and
+Consolidation. Technology sector earnings (cloud, semiconductors, software) compound
+faster than the S&P 500 average across the full market cycle.
+
+#### Archetype 2 — Recovery Sprinters: XLC, XLY
+
+| | Fall | Recovery | Consolidation | IR | ρ |
+|--|------|----------|---------------|----|---|
+| XLC | LOSS −0.0% | ALPHA +3.5% | LAG −2.5% | −0.13 | 0.85 |
+| XLY | LOSS −2.7% | ALPHA +2.7% | LAG −1.7% | −0.19 | 0.90 |
+
+Half-Evergreens. XLY (Amazon, Tesla) and XLC (Meta, Alphabet) sprint off the bottom
+driven by consumer re-acceleration. They lose their edge in Consolidation as the media
+and telecom components of XLC and the cyclical retail components of XLY normalise.
+**Not structural alpha — mean-reversion beta.**
+
+#### Archetype 3 — Defensive Burden: XLP, XLU, XLV, XLRE
+
+**High-Yield Trap** (strongest Fall protection, harshest Recovery penalty):
+
+| | Fall | Recovery | Consolidation | IR | ρ |
+|--|------|----------|---------------|----|---|
+| XLP Staples | STABLE +9.6% | LAG −15.6% | LAG −6.8% | −0.37 | 0.68 |
+| XLU Utilities | STABLE +8.6% | LAG −17.7% | ALPHA −1.7% | −0.15 | 0.58 |
+
+**The XLP/XLU protection premium is a tactical illusion:**
+
+| | Fall α | Recovery α | Full-cycle net |
+|--|--------|------------|----------------|
+| XLP | +9.6% | −15.6% | **−6.0%** |
+| XLU | +8.6% | −17.7% | **−9.1%** |
+
+The protection is fully clawed back — and then some — on the very next regime transition.
+
+**Defensive with Long Lag:**
+
+| | Fall | Recovery | Consolidation | IR | ρ |
+|--|------|----------|---------------|----|---|
+| XLV Healthcare | STABLE +6.7% | LAG −14.8% | ALPHA −3.6% | −0.33 | 0.79 |
+| XLRE Real Estate | STABLE +1.3% | LAG −11.3% | LAG −3.9% | −0.41 | 0.73 |
+
+XLV is commonly labelled defensive. It is — in Fall. The −14.8% Recovery lag is as
+punishing as XLP's. Over a full cycle its IR is −0.33. XLRE barely protects in Fall
+(+1.3%) yet lags severely — the worst risk/reward in the defensive group.
+
+#### Archetype 4 — Late Cyclicals: XLF, XLI
+
+| | Fall | Recovery | Consolidation | IR | ρ |
+|--|------|----------|---------------|----|---|
+| XLI Industrials | STABLE −0.5% | LAG −0.5% | ALPHA −1.4% | −0.15 | 0.89 |
+| XLF Financials | STABLE −1.5% | LAG −8.9% | ALPHA +3.4% | −0.28 | 0.85 |
+
+XLI is near-zero in every regime — essentially SPY with a small permanent haircut and
+no differentiated behavior. XLF is the most interesting sector outside XLK: it lags
+hard in Recovery (credit cycle tightening, rising defaults) but delivers the best
+Consolidation alpha of any non-tech sector (+3.4%, yield curve steepening).
+
+#### Archetype 5 — All-Regime Drag: XLB
+
+LOSS −0.2% / LAG −5.2% / LAG −4.3%  |  IR −0.43  |  ρ 0.84
+
+No regime is favorable. Materials fall with SPY in Fall, then lag in both recovery
+phases. Commodity input cost cycles dominate earnings relative to the S&P 500 mix.
+
+#### Archetype 6 — Macro Satellite: XLE
+
+LOSS +5.9% / LAG −13.0% / ALPHA +2.7%  |  IR −0.09  |  ρ 0.61
+
+ρ = 0.61 — XLE does not run on SPY drawdown cycles. It runs on oil price cycles.
+The +5.9% Fall alpha reflects supply-shock episodes (2022) where energy surged while
+SPY dropped — that is not a repeatable hedge property. SPY regime classification is
+structurally unreliable for XLE; it requires its own commodity regime model.
+
+---
+
+### A6. Factor ETFs — Mapping to Existing Archetypes
+
+| Ticker | Factor | IR | ρ | Fall | Recovery | Consolidation | Maps to |
+|--------|--------|----|---|------|----------|---------------|---------|
+| MTUM | Momentum | −0.09 | 0.899 | LOSS −1.3% | LAG +0.3% | ALPHA −1.2% | Anti-cycle (unique) |
+| QUAL | Quality | −0.20 | 0.984 | LOSS −0.6% | LAG +0.9% | LAG −1.1% | SPY minus alpha |
+| COWZ | Cash Flow | −0.11 | 0.863 | LOSS +2.3% | LAG −6.5% | ALPHA +1.5% | Late Cyclical |
+| VTV | Value | −0.32 | 0.916 | STABLE +3.1% | LAG −9.2% | ALPHA −0.5% | Late Cyclical |
+| DGRW | Div Growth | −0.26 | 0.968 | STABLE +3.1% | LAG −3.5% | LAG −2.9% | Defensive Burden (mild) |
+| USMV | Min Vol | −0.43 | 0.899 | STABLE +5.5% | LAG −9.9% | LAG −4.6% | Defensive Burden (strong) |
+
+**QUAL (ρ = 0.984):** The highest correlation in the universe outside SPY itself.
+SPY minus alpha — a structural underperformer in every regime. The quality premium did
+not manifest vs SPY over this history.
+
+**MTUM — the anti-cycle amplifier:** Crashes in Fall (momentum reversal), lags in
+Recovery (beaten-down stocks sprint while momentum rotates slowly), delivers ALPHA in
+Consolidation (trending markets). The opposite timing to XLK: worst when Recovery
+begins, best when volatility is absent. TAA rotation into MTUM should trigger *after*
+Recovery is confirmed, never during it.
+
+**Equal Weight (RSP) — not needed:** Equal-weight S&P 500 is structurally long
+value/cyclicals and short mega-cap tech. Pattern would be STABLE / LAG / LAG —
+already captured by VTV plus the sector spread in the universe. No new archetype.
+The equal-weight vs cap-weight debate since 2020 *is* the tech concentration question —
+which the Evergreen screen already resolves: the cycle amplifier pattern is the
+mega-cap tech premium.

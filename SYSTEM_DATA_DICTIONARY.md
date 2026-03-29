@@ -46,6 +46,10 @@ etf_1download_2wrangle_3saa/
 │   ├── risk_parity_saa.R               # Risk parity allocation
 │   └── sunburst_radar.R                # Allocation visualisation
 │
+├── scripts_exante_hypothesis/          # Exante Hypothesis: Enhancer vs Stabilizer
+│   ├── exante_engine.R                 # Metrics engine + 4-way role classification
+│   └── exante_visuals.R                # 6-plot visual library
+│
 ├── scripts_saa_taa/
 │   └── 05_saa_portfolio.R              # SAA rebalancing logic (Return.portfolio)
 │
@@ -154,6 +158,21 @@ Stage 7  sm_visuals.R + 05_shiny_builder.R     Sentinel plots + Shiny UI
 | `plot_sm_diagram_perf(xts_ret, tickers, ...)` | `spy_statemachine_diagram_rel.R` | Flow diagram + per-ticker performance bars |
 | `plot_sm_alpha_heatmap(xts_ret, tickers, ...)` | `spy_statemachine_diagram_rel.R` | Ticker × regime alpha heatmap |
 | `plot_sm_transition_matrix(xts_ret, master, ...)` | `spy_statemachine_diagram_rel.R` | Empirical transition probability matrix |
+
+### Exante Hypothesis
+| Function | File | Purpose |
+|:---|:---|:---|
+| `build_exante_metrics(xts_ret, bmk, tickers, horizons, w_blend)` | `exante_engine.R` | One row per ticker × horizon: all metrics + 4-way role classification |
+| `classify_role(delta_ret, delta_dd, ret_eps, risk_eps)` | `exante_engine.R` | Returns "Dominant" / "Enhancer" / "Stabilizer" / "Detractor" |
+| `enrich_with_metadata(exante_tbl, etf_metadata)` | `exante_engine.R` | Joins asset_class, sub_block, pf_function onto metrics table |
+| `print_role_summary(exante_tbl, horizon_filter)` | `exante_engine.R` | Console summary: role counts + top tickers per role |
+| `plot_exante_quadrant(exante_tbl, horizon_sel)` | `exante_visuals.R` | 2×2 delta_ret vs delta_dd scatter — primary classification plot |
+| `plot_corr_dd(exante_tbl, horizon_sel)` | `exante_visuals.R` | **Anti-diversification plot**: corr_full vs delta_dd — tests diversification dogma |
+| `plot_exante_heatmap(exante_tbl)` | `exante_visuals.R` | Ticker × Horizon role heatmap — shows classification stability |
+| `plot_role_counts(exante_tbl)` | `exante_visuals.R` | Stacked bar: role distribution per horizon |
+| `plot_vol_dd_tradeoff(exante_tbl, horizon_sel)` | `exante_visuals.R` | delta_vol vs delta_dd — exposes vol-DD dissociation |
+| `plot_horizon_stability(exante_tbl, horizon_sel)` | `exante_visuals.R` | Fraction of sub-periods consistent with full-sample role |
+| `run_all_exante_plots(exante_tbl)` | `exante_visuals.R` | Runs all 6 plots in sequence |
 
 ### SAA / Portfolio
 | Function | File | Purpose |

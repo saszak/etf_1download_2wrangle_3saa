@@ -550,82 +550,108 @@ plot_sm_alpha_heatmap <- function(xts_ret,
   rt       <- build_regime_table(master_r, t_fall, t_cruise)
   all_tkrs <- c(master, tickers)
 
-  # Per-ticker, per-period display returns
+  # Per-ticker, per-period: capture both absolute return and alpha vs master
   period_df <- map_dfr(all_tkrs, function(tk) {
     tk_r <- xts_ret[, tk]
     rt %>%
       rowwise() %>%
       mutate(
-        ticker   = tk,
-        raw_ret  = .period_ret(tk_r, xmin, xmax),
-        spy_ret  = period_return,
-        disp_ret = .disp_ret_sm(tk, raw_ret, spy_ret, master)
+        ticker  = tk,
+        abs_ret = .period_ret(tk_r, xmin, xmax),
+        spy_ret = period_return,
+        alpha   = abs_ret - spy_ret
       ) %>%
       ungroup() %>%
-      select(ticker, regime, disp_ret)
+      select(ticker, regime, abs_ret, alpha)
   })
 
   # Average per ticker per regime TYPE
   avg_df <- period_df %>%
     mutate(regime = as.character(regime)) %>%
     group_by(ticker, regime) %>%
-    summarise(avg_disp = mean(disp_ret, na.rm = TRUE), .groups = "drop") %>%
+    summarise(
+      avg_abs   = mean(abs_ret, na.rm = TRUE),
+      avg_alpha = mean(alpha,   na.rm = TRUE),
+      .groups   = "drop"
+    ) %>%
     mutate(
+      # Fill driven by alpha for non-master; by abs for master
+      avg_disp  = if_else(ticker == master, avg_abs, avg_alpha),
+
+      # Two-line label: abs on top, alpha below (master: abs only)
+      lbl_abs   = sprintf("%s%.1f%%",
+                          if_else(avg_abs >= 0, "+", ""), avg_abs * 100),
+      lbl_alpha = sprintf("α %s%.1f%%",
+                          if_else(avg_alpha >= 0, "+", ""), avg_alpha * 100),
       label_str = if_else(
         ticker == master,
-        percent(avg_disp, accuracy = 0.1),
-        sprintf("%s%.1f%%", if_else(avg_disp >= 0, "+", ""), avg_disp * 100)
+        lbl_abs,
+        paste0(lbl_abs, "\n", lbl_alpha)
       ),
+
       ticker    = factor(ticker, levels = rev(all_tkrs)),
       regime    = factor(regime, levels = c("Fall", "Recovery", "Consolidation")),
       is_master = ticker == master,
-      txt_color = if_else(abs(avg_disp) > 0.06, "white", "grey20")
+
+      # Dark blue = positive, dark red = negative (based on fill value)
+      txt_color = if_else(avg_disp >= 0, "#1B3A6B", "#7B1010")
     )
 
+  fill_limit <- max(abs(avg_df$avg_disp), na.rm = TRUE)
+
   ggplot(avg_df, aes(x = regime, y = ticker, fill = avg_disp)) +
-    geom_tile(color = "white", linewidth = 0.6) +
+    geom_tile(color = "white", linewidth = 1.2) +
     geom_text(aes(label = label_str, color = txt_color),
-              size = 3.0, fontface = "bold", show.legend = FALSE) +
+              size = 4.2, fontface = "bold", lineheight = 1.25,
+              show.legend = FALSE) +
 
     # Navy outline on SPY row
     geom_tile(
       data = avg_df %>% filter(is_master),
       aes(x = regime, y = ticker),
-      fill = NA, color = "#1D3557", linewidth = 1.3,
+      fill = NA, color = "#1D3557", linewidth = 2.0,
       show.legend = FALSE
     ) +
 
     scale_fill_gradient2(
-      low      = "#D90429",
-      mid      = "white",
-      high     = "#2D6A4F",
+      low      = "#F4CCCC",   # light red  — dark text still readable
+      mid      = "#F0F0F0",   # light grey
+      high     = "#C8E6C9",   # light green — dark text still readable
       midpoint = 0,
-      name     = "Avg Return / Alpha",
+      limits   = c(-fill_limit, fill_limit),
+      name     = "Alpha\n(fill basis)",
       labels   = percent_format(accuracy = 1)
     ) +
     scale_color_identity() +
     scale_x_discrete(
       labels = c(
-        Fall          = paste0("FALL\n≥", percent(t_fall, accuracy = 1)),
+        Fall          = paste0("FALL\n(≥", percent(t_fall, accuracy = 1), ")"),
         Recovery      = "RECOVERY",
         Consolidation = "CONSOLIDATION"
       )
     ) +
 
-    theme_minimal(base_size = 11) +
+    theme_minimal(base_size = 13) +
     theme(
-      panel.grid    = element_blank(),
-      axis.text.x   = element_text(face = "bold", size = 9.5, color = "grey25"),
-      axis.text.y   = element_text(face = "bold", size = 9),
-      axis.title    = element_blank(),
+      panel.grid      = element_blank(),
+      axis.text.x     = element_text(face = "bold", size = 12, color = "grey20",
+                                     margin = margin(t = 6)),
+      axis.text.y     = element_text(face = "bold", size = 11, color = "grey20",
+                                     margin = margin(r = 4)),
+      axis.title      = element_blank(),
       legend.position = "right",
-      plot.title    = element_text(face = "bold", size = 13),
-      plot.subtitle = element_text(color = "grey50", size = 9)
+      legend.title    = element_text(size = 10, face = "bold"),
+      legend.text     = element_text(size = 9),
+      plot.title      = element_text(face = "bold", size = 14),
+      plot.subtitle   = element_text(color = "grey45", size = 10, margin = margin(b = 8)),
+      plot.margin     = margin(10, 10, 10, 10)
     ) +
     labs(
-      title    = sprintf("Avg Return per Regime  —  %s: Absolute  |  Others: α vs %s",
-                         master, master),
-      subtitle = "Navy border = SPY (absolute avg)  |  All other rows = avg alpha vs SPY per regime type  |  + prefix = outperformed SPY"
+      title    = sprintf("%s Regime Heatmap  —  Abs & Relative Performance", master),
+      subtitle = sprintf(
+        "Each cell: top = Abs return  |  bottom = α vs %s  |  Fill = alpha  |  Blue = positive · Red = negative  |  Fall ≥%s",
+        master, percent(t_fall, accuracy = 1)
+      )
     )
 }
 
@@ -661,7 +687,7 @@ plot_sm_transition_matrix <- function(xts_ret,
       from  = factor(from, levels = rev(all_regimes)),
       to    = factor(to,   levels = all_regimes),
       label = if_else(n_obs > 0,
-                      sprintf("%.0f%%\n(n=%d)", prob * 100, n_obs),
+                      sprintf("%.0f%%  (n=%d)", prob * 100, n_obs),
                       "—"),
       txt_color = if_else(prob > 0.45, "white", "grey25"),
       is_diag   = as.character(from) == as.character(to)
@@ -670,7 +696,7 @@ plot_sm_transition_matrix <- function(xts_ret,
   ggplot(full_grid, aes(x = to, y = from, fill = prob)) +
     geom_tile(color = "white", linewidth = 0.8) +
     geom_text(aes(label = label, color = txt_color),
-              size = 3.2, fontface = "bold", lineheight = 1.2,
+              size = 4.5, fontface = "bold",
               show.legend = FALSE) +
 
     # Diagonal: thick grey border to mark self-loops
@@ -760,6 +786,10 @@ run_sm_diagram_rel <- function(xts_ret,
 # MAIN
 # ==============================================================================
 
+if (isTRUE(getOption("knitr.in.progress"))) {
+  # sourced inside Rmd — skip auto-run
+} else {
+
 if (!exists("xts_ret"))
   xts_ret <- readRDS(here::here("02_data_processed/xts_ret_returns.rds"))
 
@@ -778,4 +808,14 @@ run_sm_diagram_rel(
   t_cruise = 0.05
 )
 
+} # end knitr guard
+
+
+
+plot_sm_alpha_heatmap (xts_ret,
+                       core_universe,
+                                  master   = "SPY",
+                                  t_fall   = 0.10,
+                                  t_cruise = 0.05) 
+  
 ################################################################################
