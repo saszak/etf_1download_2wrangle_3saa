@@ -42,7 +42,7 @@ mod_comp_server <- function(id, filtered, relative_mode, bmk) {
     # Tickers available in xts_ret_shiny (and benchmark must also be available)
     avail_tickers <- reactive({
       b    <- eff_bmk()
-      syms <- filtered()$symbol
+      syms <- filtered() %>% arrange(display_rank) %>% pull(symbol)
       syms <- syms[syms %in% colnames(xts_ret_shiny)]
       syms <- syms[syms != b]          # exclude benchmark row itself
       syms
@@ -90,6 +90,9 @@ mod_comp_server <- function(id, filtered, relative_mode, bmk) {
             if (!tk      %in% colnames(xts_ret_shiny) ||
                 !bmk_sym %in% colnames(xts_ret_shiny)) return(NULL)
 
+            tk_name  <- perf_data$short_name[perf_data$symbol == tk][1] %||% ""
+            tk_lbl   <- .tk_label(tk, tk_name)
+
             ret_list <- list(
               tk      = xts_ret_shiny[, tk],
               bmk_sym = xts_ret_shiny[, bmk_sym]
@@ -101,9 +104,9 @@ mod_comp_server <- function(id, filtered, relative_mode, bmk) {
                 ret_list = ret_list,
                 rt       = rt_shiny,
                 colours  = c("#7c3aed", "#9ca3af"),
-                labels   = c(tk, bmk_sym)
+                labels   = c(tk_lbl, bmk_sym)
               ) +
-                labs(title = paste0(tk, "  \u2014  Cumulative Wealth vs ", bmk_sym)),
+                labs(title = paste0(tk_lbl, "  \u2014  Cumulative Wealth vs ", bmk_sym)),
               error = function(e) {
                 ggplot() +
                   annotate("text", x = 0.5, y = 0.5,

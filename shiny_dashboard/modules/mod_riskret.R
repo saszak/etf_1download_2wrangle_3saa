@@ -6,6 +6,7 @@
 mod_riskret_ui <- function(id) {
   ns <- NS(id)
   tabsetPanel(
+    id   = ns("tabs"),
     type = "pills",
     tabPanel("Custom",
       layout_columns(
@@ -45,6 +46,33 @@ mod_riskret_ui <- function(id) {
           plotOutput(ns("pa_rel"), height = "calc(100vh - 360px)")
         )
       ),
+    ),
+    tabPanel("Return Matrix",
+      tagList(
+        div(
+          style = paste0(
+            "background:", DARK_HDR, "; color:", TEXT_DIM, ";",
+            " font-size:11px; padding:5px 12px; margin-bottom:4px;",
+            " display:flex; gap:18px; align-items:center;"
+          ),
+          span("\u25a0 Red < 0%  \u2502  Pink 0\u20133%  \u2502  Blue 3\u20137%  \u2502  Light Green 7\u201310%  \u2502  Dark Green > 10%  \u2502  White numbers = P/E headwind"),
+          div(
+            style = "display:flex; gap:14px; margin-left:auto; align-items:center;",
+            span("From year:"),
+            sliderInput(
+              ns("from_yr"), label = NULL,
+              min = 1900, max = as.integer(format(Sys.Date(), "%Y")) - 5,
+              value = 1950, step = 5, width = "220px", ticks = FALSE
+            ),
+            checkboxInput(ns("show_25yr"), "25-yr diagonal", value = TRUE),
+            checkboxInput(ns("show_text"),  "Show numbers",  value = TRUE)
+          )
+        ),
+        div(
+          style = paste0("overflow-y:auto; height:calc(100vh - 302px); background:white;"),
+          plotOutput(ns("ret_matrix"), height = "calc(100vh - 302px)")
+        )
+      )
     ),
     tabPanel("Ann. Stats",
       layout_columns(
@@ -361,6 +389,15 @@ mod_riskret_server <- function(id, filtered, bmk) {
       )
       grid(nx = 20, ny = 20, col = "#cccccc55", lty = "solid", lwd = 0.4)
     }, bg = "#111318")
+
+    # ── Return Matrix ─────────────────────────────────────────────────────────
+    output$ret_matrix <- renderPlot({
+      plot_stock_matrix(
+        from_yr   = input$from_yr,
+        show_25yr = isTRUE(input$show_25yr),
+        show_text = isTRUE(input$show_text)
+      )
+    }, bg = "white")
 
     output$pa_grid <- renderReactable({
       syms <- .pa_syms()

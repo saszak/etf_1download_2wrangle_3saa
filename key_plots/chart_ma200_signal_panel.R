@@ -36,7 +36,7 @@ library(scales)
 
 # ── Single ticker panel ────────────────────────────────────────────────────────
 .ma200_single_panel <- function(trend_signals_tbl, ticker_sym,
-                                saa_wt = NULL, hurst = NULL) {
+                                saa_wt = NULL, hurst = NULL, label = NULL) {
 
   df <- trend_signals_tbl %>%
     filter(symbol == ticker_sym) %>%
@@ -67,6 +67,7 @@ library(scales)
 
   title_str <- paste0(
     ticker_sym,
+    if (!is.null(label) && nchar(label) > 0) paste0(" \u2014 ", label) else "",
     if (nchar(wt_label) > 0) sprintf("  (%s SAA)", wt_label) else "",
     h_label
   )

@@ -1,0 +1,596 @@
+---
+title: "SAA Overlay Workflow"
+subtitle: "Build → Classify → Fingerprint → Backtest — End-to-End Guide"
+author: "ETF Intelligence Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    df_print: paged
+  pdf_document:
+    toc: true
+    latex_engine: xelatex
+params:
+  ticker1:            "SPY"    # first SAA component
+  ticker2:            "IEF"    # second SAA component; set to null for single-ticker SAA
+  w1:                 0.60     # target weight for ticker1 (w2 = 1 - w1 automatically)
+  enh_pct:            0.10     # enhancer overlay fraction α
+  stab_pct:           0.10     # stabilizer overlay fraction α
+  top_n:              5        # number of candidates to rank
+  print_fingerprints: false    # true = run screen_ticker() per candidate (slow)
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 14,
+  fig.height = 8
+)
+library(here)
+source(here("project_tree.R"))
+source(here("00_libraries.R"))
+source(here(project_tree$scripts$spy_dd_regime))
+source(here(project_tree$scripts$wrangle))
+rt <- build_regime_table(xts_ret[, "SPY"])
+
+# Load the workflow — knitr.in.progress guard suppresses auto-print
+source(here("scripts_daa_saa_taa/saa_overlay_workflow.R"), local = knitr::knit_global())
+
+# Resolve ticker2: YAML null arrives as the string "null" — convert to R NULL
+.t2 <- params$ticker2
+p_ticker2 <- if (is.null(.t2) || identical(.t2, "null") || identical(trimws(.t2), "")) {
+  NULL
+} else {
+  .t2
+}
+rm(.t2)
+
+# Human-readable SAA label for headings
+saa_label <- if (is.null(p_ticker2)) {
+  sprintf("100%% %s", params$ticker1)
+} else {
+  sprintf("%.0f%%/%.0f%% %s/%s",
+          params$w1 * 100, (1 - params$w1) * 100,
+          params$ticker1, p_ticker2)
+}
+```
+
+---
+
+# 1  Purpose
+
+This workflow answers a single practical question:
+
+> Given a binary SAA (two tickers + target weights), which assets from the
+> full universe best **enhance** its return or **stabilise** its drawdown —
+> and how much does adding each one improve the portfolio?
+
+It runs five steps automatically:
+
+| Step | Function | Output |
+|---|---|---|
+| 1 | `build_saa_ret()` | Daily-rebalanced SAA return series → injected into `xts_ret` |
+| 2 | `rank_enhancers()` / `rank_stabilizers()` | Top 5 candidates ranked by criterion |
+| 3 | `overlay_summary_heatmap()` | Two-panel ranking table |
+| 4 | `fingerprint_candidates()` | `screen_ticker()` fingerprint per candidate |
+| 5 | `backtest_ls_overlay()` | Wealth + L/S spread + stats for each set |
+
+All steps are orchestrated by a single call to `run_saa_overlay_workflow()`.
+
+---
+
+# 2  Design Choices (v1)
+
+| Dimension | v1 Choice | Rationale |
+|---|---|---|
+| SAA type | Binary (two tickers) | Simplest starting point |
+| SAA rebalancing | Daily — $r_{\text{SAA}} = w_1 r_1 + w_2 r_2$ | Constant-weight; no loop needed |
+| SAA injection | Added to `xts_ret` as `"saa{W1}{W2}"` | Allows `classify_universe(baseline = "saa6040")` with no code changes |
+| Enhancer ranking | `full_ir` — information ratio over full period | Single interpretable number; already computed by `classify_universe()` |
+| Stabilizer ranking | `dd_reduction` — MaxDD reduction in pp | Most direct measure of the overlay's defensive value |
+| Universe | Full Sovereign Universe (default); pass `universe` vector to restrict | Consistent with existing `classify_universe()` interface |
+| Overlay formula | **Option B**: $r_{\text{ov}} = r_{\text{SAA}} + \alpha (r_{\text{candidate}} - r_{\text{SAA}})$ | Keeps pure L/S framing; maps to existing `build_ls_portfolio()` pattern |
+| Backtest | Long overlay-SAA / Short original-SAA | Spread PnL = $\alpha (r_{\text{candidate}} - r_{\text{SAA}})$ |
+| Fingerprint | `screen_ticker()` per candidate + condensed summary | Reuses existing 7-panel fingerprint infrastructure |
+
+---
+
+# 3  Overlay Formula
+
+$$r_t^{\text{overlay}} = r_t^{\text{SAA}} + \alpha \times \left(r_t^{\text{candidate}} - r_t^{\text{SAA}}\right)$$
+
+Expanding:
+
+$$= (1 - \alpha)\, r_t^{\text{SAA}} + \alpha\, r_t^{\text{candidate}}$$
+
+So the overlay portfolio is simply **$(1-\alpha)$ of SAA plus $\alpha$ of the
+candidate** — but the L/S framing makes clear what you are *adding*: a spread
+trade on top of unchanged SAA exposure.
+
+**L/S spread daily PnL:**
+
+$$\text{spread}_t = \alpha \times \left(r_t^{\text{candidate}} - r_t^{\text{SAA}}\right)$$
+
+Cumulative spread > 1 means the candidate is beating the SAA over that period.
+
+---
+
+# 4  Function Reference
+
+## 4.1  `build_saa_ret()`
+
+```r
+build_saa_ret(
+  ticker1,          # character — first component (e.g. "SPY")
+  ticker2,          # character — second component (e.g. "IEF")
+  w1,               # numeric  — target weight for ticker1 (e.g. 0.60)
+  w2  = 1 - w1,     # numeric  — complement (default)
+  name = NULL       # character — column name; default "saa{W1}{W2}" e.g. "saa6040"
+)
+```
+
+**What it does:**
+
+1. Computes $r_{\text{SAA}, t} = w_1 r_{1,t} + w_2 r_{2,t}$ over the common date range.
+2. Assigns the result to the global `xts_ret` as a new column.
+3. Prints a one-line confirmation with the column name, date range, and day count.
+
+If the column already exists, it is silently skipped (safe to re-run).
+
+## 4.2  `rank_enhancers()` / `rank_stabilizers()`
+
+```r
+rank_enhancers(
+  baseline,           # SAA column name in xts_ret (e.g. "saa6040")
+  universe  = NULL,   # character vector; NULL = all cols except baseline
+  top_n     = 5L,
+  overlay_w = 0.10,   # overlay weight passed to screen_ticker() inside classify_universe()
+  verbose   = FALSE
+)
+```
+
+Both functions call `classify_universe(baseline = saa_name, ...)` which runs
+`screen_ticker()` for every ticker in the universe and returns the full
+classification table. Then:
+
+- **`rank_enhancers()`** filters to `classification %in% c("Enhancer","Dual")`,
+  sorts descending by `full_ir`, returns top N.
+- **`rank_stabilizers()`** filters to `classification %in% c("Stabilizer","Dual")`,
+  sorts descending by `dd_reduction`, returns top N.
+
+**Returned columns:** `ticker`, `classification`, `trigger_type`, `hedge_type`,
+`full_ir`, `dd_reduction`, `ins_ratio`, `fall_corr`, `n_days`.
+
+**Key metrics:**
+
+| Metric | Definition | Units |
+|---|---|---|
+| `full_ir` | Information ratio: excess Ann Ret / tracking error vs SAA | ratio |
+| `dd_reduction` | Reduction in SAA MaxDD when overlay_w of candidate is added | pp (percentage points) |
+| `ins_ratio` | dd_reduction / return_drag — insurance per unit of cost | ratio |
+| `fall_corr` | Correlation with SAA *during Fall regimes only* | −1 to +1 |
+
+## 4.3  `fingerprint_candidates()`
+
+```r
+fingerprint_candidates(
+  tickers,            # character vector — tickers to screen
+  baseline,           # SAA column name
+  overlay_w = 0.10,
+  print_plot = TRUE,  # print 7-panel fingerprint to Plots pane
+  ...                 # additional args passed to screen_ticker()
+)
+```
+
+Loops `screen_ticker(tk, baseline = saa_name)` for each ticker. Returns a
+named list; each element is a `screen_ticker()` result:
+
+```r
+res$enh_screens[["GLD"]]$plot        # 7-panel fingerprint plot
+res$enh_screens[["GLD"]]$enhancer    # enhancer verdict tibble
+res$enh_screens[["GLD"]]$stabilizer  # stabilizer verdict tibble
+```
+
+Set `print_fingerprints = FALSE` in `run_saa_overlay_workflow()` to skip this
+step during exploratory runs (it is the slowest step).
+
+## 4.4  `overlay_summary_heatmap()`
+
+```r
+overlay_summary_heatmap(enh_tbl, stab_tbl, baseline = "")
+```
+
+Two-panel patchwork figure:
+
+- **Left — Enhancers:** Rank | Ticker | Class | Trigger | Full IR (traffic-light: green = #1, red = #N)
+- **Right — Stabilizers:** Rank | Ticker | Class | Hedge | DD Red (pp) | Ins Ratio | Fall ρ
+
+## 4.5  `backtest_ls_overlay()`
+
+```r
+backtest_ls_overlay(
+  saa_name,                           # SAA column in xts_ret
+  tickers,                            # candidate tickers
+  pct,                                # α — overlay fraction
+  type = c("enhancer","stabilizer")   # controls colour palette and title
+)
+```
+
+Returns a list with five elements:
+
+| Element | Content |
+|---|---|
+| `$fig` | Patchwork figure: P1 wealth + P2 spread + P3 stats table |
+| `$scatter` | Two-panel scatter: absolute (Ann Vol vs Ann Ret, iso-Sharpe) + relative (TE vs excess return, iso-IR) |
+| `$stats` | Tibble: Ann Ret / Ann Vol / Max DD / Sharpe / Calmar for SAA + each overlay |
+| `$ret` | xts: SAA + all overlay return series on common dates |
+| `$spread` | data.frame: daily cumulative spread for each candidate |
+
+**Figure panels:**
+
+- **P1 (wealth, tall):** SAA in purple + each overlay in its colour; end-of-line labels show ticker + Ann Ret; regime shading.
+- **P2 (spread, medium):** Cumulative $\alpha(r_{\text{candidate}} - r_{\text{SAA}})$ for each candidate; dashed zero line; regime shading.
+- **P3 (stats, short):** Traffic-light table — green = best metric, red = worst; strategy names in their respective colours.
+
+## 4.6  `run_saa_overlay_workflow()` — master orchestrator
+
+```r
+run_saa_overlay_workflow(
+  ticker1,
+  ticker2,
+  w1,
+  w2                 = 1 - w1,
+  saa_name           = NULL,    # auto: "saa{W1}{W2}"
+  universe           = NULL,    # NULL = full Sovereign Universe
+  top_n              = 5L,
+  enh_pct            = 0.10,    # α for enhancer overlays
+  stab_pct           = 0.10,    # α for stabilizer overlays
+  overlay_w          = 0.10,    # classification overlay weight
+  print_fingerprints = TRUE,    # FALSE = skip screen_ticker() (faster)
+  verbose            = FALSE
+)
+```
+
+Runs all five steps in sequence and returns a named list:
+
+```r
+res$saa_name       # "saa6040"
+res$enhancers      # tibble — top 5 enhancers with metrics
+res$stabilizers    # tibble — top 5 stabilizers with metrics
+res$summary_fig    # patchwork heatmap (Step 3)
+res$enh_screens    # named list of screen_ticker() results (Step 4)
+res$stab_screens   # named list of screen_ticker() results (Step 4)
+res$enh_backtest   # list(fig, stats, ret, spread) — enhancer backtest
+res$stab_backtest  # list(fig, stats, ret, spread) — stabilizer backtest
+```
+
+---
+
+# 5  Live Example — `r saa_label`
+
+## 5.1  Run the full workflow
+
+Parameters active in this render (set via `params` in YAML or `rmarkdown::render()`):
+
+| Param | Value | Meaning |
+|---|---|---|
+| `ticker1` | `r params$ticker1` | First SAA component |
+| `ticker2` | `r if (is.null(p_ticker2)) "*(none — single-ticker SAA)*" else p_ticker2` | Second SAA component |
+| `w1` | `r sprintf("%.0f%%", params$w1 * 100)` | Weight of ticker1 |
+| `enh_pct` | `r sprintf("%.0f%%", params$enh_pct * 100)` | Enhancer overlay α |
+| `stab_pct` | `r sprintf("%.0f%%", params$stab_pct * 100)` | Stabilizer overlay α |
+| `top_n` | `r params$top_n` | Candidates per type |
+| `print_fingerprints` | `r params$print_fingerprints` | Run screen_ticker()? |
+
+```{r workflow-run, fig.height=6}
+res <- run_saa_overlay_workflow(
+  ticker1            = params$ticker1,
+  ticker2            = p_ticker2,          # NULL for single-ticker SAA
+  w1                 = params$w1,
+  enh_pct            = params$enh_pct,
+  stab_pct           = params$stab_pct,
+  top_n              = params$top_n,
+  print_fingerprints = params$print_fingerprints
+)
+```
+
+## 5.2  Ranking summary
+
+```{r summary-heatmap, fig.height=4}
+print(res$summary_fig)
+```
+
+**Reading the table:**
+
+- **Enhancers** are ranked by `full_ir` — the annualised excess return per unit
+  of tracking error vs the SAA. Positive IR means the ticker beat the SAA on a
+  risk-adjusted basis over the full history.
+- **Stabilizers** are ranked by `dd_reduction` (in pp) — how many percentage
+  points of MaxDD the SAA loses when 10% of the portfolio is replaced by the
+  candidate. `Ins Ratio` = DD reduction / return drag; higher = cheaper insurance.
+- **Hedge type:**
+  - `FULL` — Fall correlation ≤ −0.10: true crisis hedge, rallies when SAA falls.
+  - `PARTIAL` — Fall correlation between −0.10 and +0.30: uncorrelated in Falls.
+  - `CONDITIONAL` — Fall correlation > +0.30: improves DD only through portfolio maths.
+
+## 5.3  Enhancer raw rankings
+
+```{r enh-table}
+res$enhancers[, c("ticker","classification","trigger_type","full_ir","fall_corr","n_days")]
+```
+
+## 5.4  Stabilizer raw rankings
+
+```{r stab-table}
+res$stabilizers[, c("ticker","classification","hedge_type","dd_reduction","ins_ratio","fall_corr")]
+```
+
+---
+
+# 6  Enhancer Backtest
+
+```{r enh-backtest, fig.height=13}
+print(res$enh_backtest$fig)
+```
+
+**Reading the figure:**
+
+- **P1 (wealth):** Purple = SAA baseline; coloured lines = each enhancer overlay
+  at $\alpha = 10\%$. End-of-line annotation shows ticker + annualised return.
+  Outperformance vs SAA means the overlay-SAA portfolio beat the base portfolio.
+- **P2 (spread):** Cumulative PnL of the pure L/S leg:
+  $\alpha \times (r_{\text{enhancer}} - r_{\text{SAA}})$. Above 1 = enhancer
+  beating SAA since inception; below 1 = SAA winning.
+- **P3 (stats):** Traffic-light colouring per metric column (green = best across
+  all rows, red = worst). Strategy names in their respective colours.
+
+**Stats table:**
+
+```{r enh-stats}
+res$enh_backtest$stats %>%
+  dplyr::mutate(
+    `Ann Ret` = sprintf("%.1f%%", `Ann Ret` * 100),
+    `Ann Vol` = sprintf("%.1f%%", `Ann Vol` * 100),
+    `Max DD`  = sprintf("%.1f%%", `Max DD`  * 100)
+  )
+```
+
+---
+
+# 7  Stabilizer Backtest
+
+```{r stab-backtest, fig.height=13}
+print(res$stab_backtest$fig)
+```
+
+**Reading the figure:** Same structure as the enhancer figure. For stabilizers,
+the key panels are:
+
+- **P1:** Does the overlay reduce drawdown in Fall regimes (red-shaded bands)?
+- **P2:** Is the spread PnL roughly flat outside Falls (low drag in good times)?
+
+The ideal stabilizer profile: spread hovers near zero in Consolidation/Recovery,
+then spikes sharply positive during Falls — insurance that costs little in calm
+markets.
+
+**Stats table:**
+
+```{r stab-stats}
+res$stab_backtest$stats %>%
+  dplyr::mutate(
+    `Ann Ret` = sprintf("%.1f%%", `Ann Ret` * 100),
+    `Ann Vol` = sprintf("%.1f%%", `Ann Vol` * 100),
+    `Max DD`  = sprintf("%.1f%%", `Max DD`  * 100)
+  )
+```
+
+---
+
+# 8  Fingerprints
+
+When `print_fingerprints = TRUE`, each candidate generates a 7-panel
+`screen_ticker()` fingerprint:
+
+| Panel | Content |
+|---|---|
+| P1 | Wealth: ticker vs SAA |
+| P2 | L/S spread: ticker minus SAA (cumulative) |
+| P3 | Drawdown comparison |
+| P4 | Return distribution |
+| P5 | Rolling 63-day correlation with SAA |
+| P6 | Regime-conditional correlation (Fall / Recovery / Consolidation) |
+| P7 | Rolling 63-day information ratio |
+
+```r
+# Access individual fingerprints after running with print_fingerprints = TRUE
+res2 <- run_saa_overlay_workflow("SPY", "IEF", w1 = 0.60, print_fingerprints = TRUE)
+res2$enh_screens[["GLD"]]$plot       # 7-panel fingerprint for GLD
+res2$enh_screens[["GLD"]]$enhancer   # enhancer verdict + scores
+res2$stab_screens[["TLT"]]$stabilizer  # stabilizer verdict + dd metrics
+```
+
+---
+
+# 9  Advanced Usage
+
+## 9.1  Custom universe
+
+Restrict classification to a thematic subset:
+
+```r
+equity_hedges <- c("GLD","SLV","BIL","SHY","TLT","BNDX","VXX","DBMF")
+
+res_eq <- run_saa_overlay_workflow(
+  ticker1  = "SPY", ticker2 = "IEF", w1 = 0.60,
+  universe = equity_hedges,
+  enh_pct  = 0.10, stab_pct = 0.10,
+  print_fingerprints = FALSE
+)
+```
+
+## 9.2  Different SAA pairs
+
+The workflow is pair-agnostic. Any two tickers in `xts_ret` work:
+
+```r
+# Growth / bond
+res_qqq <- run_saa_overlay_workflow("QQQ", "AGG", w1 = 0.65)
+
+# International equity / gold
+res_intl <- run_saa_overlay_workflow("URTH", "GLD", w1 = 0.70)
+```
+
+Each call creates a new named column in `xts_ret` (e.g. `"saa6535"`, `"saa7030"`),
+so multiple SAA variants can coexist.
+
+## 9.3  Varying α
+
+To compare overlay sizes, run `backtest_ls_overlay()` directly:
+
+```r
+for (alpha in c(0.05, 0.10, 0.15, 0.20)) {
+  bt <- backtest_ls_overlay(
+    saa_name = "saa6040",
+    tickers  = res$enhancers$ticker,
+    pct      = alpha,
+    type     = "enhancer"
+  )
+  print(bt$fig)
+}
+```
+
+## 9.4  Accessing the classification table
+
+`rank_enhancers()` and `rank_stabilizers()` return only the top N rows.
+To see the full table:
+
+```r
+source(here("scripts_daa_saa_taa/screen_ticker.R"))
+full_cls <- classify_universe(
+  baseline  = "saa6040",
+  xts_ret   = xts_ret,
+  rt        = rt,
+  overlay_w = 0.10,
+  verbose   = TRUE
+)
+# All tickers with their classification, full_ir, dd_reduction, ins_ratio, etc.
+```
+
+---
+
+# 10  Risk-Return Scatter
+
+Each `backtest_ls_overlay()` call returns a two-panel scatter stored in
+`$scatter`. The orchestrator prints both automatically; in Rmd access them
+via `res$enh_backtest$scatter` and `res$stab_backtest$scatter`.
+
+## 10.1  Enhancer scatter
+
+```{r scatter-enh, fig.width=13, fig.height=6}
+res$enh_backtest$scatter
+```
+
+## 10.2  Stabilizer scatter
+
+```{r scatter-stab, fig.width=13, fig.height=6}
+res$stab_backtest$scatter
+```
+
+## 10.3  How to read the two panels
+
+**Left panel — Absolute (Ann Vol vs Ann Ret)**
+
+Iso-Sharpe reference lines (SR = 0.5 / 1.0 / 1.5) fan from the origin.
+The SAA baseline appears in purple; overlays are coloured by type.
+
+| Position relative to SAA | Interpretation |
+|---|---|
+| Up and left | Higher return, lower vol — strictly dominant |
+| Up and right | Higher return, higher vol — Sharpe gain if above SAA's iso-line |
+| Down and left | Lower vol, lower return — acceptable when DD reduction is the goal |
+| Down and right | Strictly dominated — avoid |
+
+**Right panel — Relative / L/S (Tracking Error vs Excess Return)**
+
+Axes are the spread portfolio (overlay − SAA): tracking error on x,
+excess return on y. Iso-IR lines at IR = −0.5 / 0.5 / 1.0 / 1.5.
+Each label shows the ticker and its Information Ratio
+(`IR = excess_ret / tracking_error`).
+
+Key properties:
+
+- **IR is scale-invariant** — doubling α doubles both excess return and
+  tracking error, leaving IR unchanged. Candidates rank the same at any
+  overlay size.
+- **Stabilizers appear below the zero line by design** — they drag
+  return to buy DD insurance. Their value shows up in the absolute
+  panel (lower vol, shallower drawdowns).
+- **IR > 0.5** is a practical minimum for an enhancer worth including;
+  **IR > 1.0** is a strong signal.
+
+## 10.4  Scatter interpretation workflow
+
+1. Absolute scatter — confirm the overlay is not strictly dominated
+   (right and down of SAA).
+2. Relative scatter — check IR. IR > 0.5 is the minimum bar for
+   enhancers.
+3. Cross-check with the spread chart (`$fig` panel 2). A high IR driven
+   by one or two Fall episodes is less reliable than a flat, steady
+   spread.
+4. Stabilizers: expect negative excess return. Their case is purely
+   in the absolute panel (lower vol/DD) and the spread panel (positive
+   spikes during Falls).
+
+---
+
+# 11  Interpretation Guide
+
+## What makes a good enhancer?
+
+An enhancer consistently beats the SAA on a risk-adjusted basis across all
+three regimes. The strongest enhancers show:
+
+- `full_ir > 0.3` — meaningful outperformance per unit of tracking risk
+- `trigger_type = "ALPHA"` — both the candidate and SAA rise, but the candidate
+  rises more (Consolidation/Recovery leadership)
+- Fall excess ≥ 0 — doesn't underperform significantly during drawdowns
+
+> High `full_ir` with negative Fall excess is an *enhancer in good times only*
+> — valuable for return but adds risk concentration at the worst moment.
+
+## What makes a good stabilizer?
+
+A stabilizer reduces the SAA's MaxDD at low cost to return. The strongest
+stabilizers show:
+
+- `dd_reduction > 2pp` — meaningful drawdown protection at 10% overlay
+- `ins_ratio > 5` — each pp of return drag buys ≥5pp of DD reduction
+- `fall_corr < 0` — genuinely negatively correlated with SAA during Falls (`FULL` hedge)
+- Spread PnL: flat in calm periods, positive spikes during Falls
+
+> `CONDITIONAL` hedge types improve DD only through portfolio variance maths
+> (low correlation but positive Fall correlation) — cheaper but less reliable
+> during crisis episodes than `FULL` hedges.
+
+## Decision table
+
+| Objective | Primary metric | Secondary metric |
+|---|---|---|
+| Add return without increasing risk | `full_ir` | Sharpe vs SAA baseline |
+| Reduce worst drawdown | `dd_reduction` | `ins_ratio` |
+| Reduce tail loss | `CVaR 5%` improvement | `fall_corr` |
+| Cheapest insurance | `ins_ratio` | `return_drag` |
+| Regime-aware protection | `hedge_type = FULL` | `fall_corr` < −0.10 |
+
+---
+
+*Source: `scripts_daa_saa_taa/saa_overlay_workflow.R`*
+*Classification via `classify_universe()` in `screen_ticker.R`*
+*Fingerprints via `screen_ticker()` in `screen_ticker.R`*
+*Regime shading via `build_regime_table()` with T_FALL = 10%*

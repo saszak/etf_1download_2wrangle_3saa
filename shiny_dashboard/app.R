@@ -160,12 +160,11 @@ ui <- page_sidebar(
       tabPanel("Table",   mod_perf_table_ui("perf_table")),
       tabPanel("Treemap", mod_treemap_ui("treemap")),
       tabPanel("Plots",    mod_plots_ui("plots")),
-      tabPanel("AbsRel",   mod_absrel_ui("absrel")),
-      tabPanel("Cal Year", mod_calyear_ui("calyear")),
       tabPanel("Comp",      mod_comp_ui("comp")),
       tabPanel("Technical", mod_technical_ui("technical")),
       tabPanel("Regime",    mod_regime_ui("regime")),
-      tabPanel("RiskRet",   mod_riskret_ui("riskret"))
+      tabPanel("RiskRet",   mod_riskret_ui("riskret")),
+      tabPanel("Patterns",  mod_patterns_ui("patterns"))
     )
   )
 )
@@ -217,7 +216,11 @@ server <- function(input, output, session) {
       }
     }
 
-    df %>% arrange(desc(.data[[effective_sort()]]))
+    if (effective_sort() == "symbol") {
+      df %>% arrange(display_rank)
+    } else {
+      df %>% arrange(desc(.data[[effective_sort()]]))
+    }
   })
 
   output$bullish_pct <- renderText({
@@ -236,17 +239,12 @@ server <- function(input, output, session) {
   )
 
   mod_treemap_server("treemap", filtered,
-    treemap_group = reactive(input$treemap_group)
-  )
-
-  mod_plots_server("plots", filtered)
-
-  mod_absrel_server("absrel", filtered,
+    treemap_group = reactive(input$treemap_group),
     relative_mode = reactive(input$relative_mode),
     bmk           = reactive(input$bmk)
   )
 
-  mod_calyear_server("calyear", filtered,
+  mod_plots_server("plots", filtered,
     relative_mode = reactive(input$relative_mode),
     bmk           = reactive(input$bmk)
   )
@@ -266,6 +264,8 @@ server <- function(input, output, session) {
   mod_riskret_server("riskret", filtered,
     bmk = reactive(input$bmk)
   )
+
+  mod_patterns_server("patterns", filtered)
 }
 
 shinyApp(ui, server)

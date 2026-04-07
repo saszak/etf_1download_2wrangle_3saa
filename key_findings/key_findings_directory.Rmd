@@ -1,0 +1,713 @@
+---
+title: "Project Directory — ETF Intelligence"
+subtitle: "Key Ideas, Key Functions, and Subprojects"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+---
+
+<style>
+h2 { border-bottom: 3px solid #2c3e50; padding-bottom: 6px; margin-top: 40px; }
+h3 { color: #2c3e50; border-left: 4px solid #3498db; padding-left: 10px; margin-top: 24px; }
+h4 { color: #555; margin-top: 16px; }
+.fn-box {
+  background: #f8f9fa; border-left: 4px solid #3498db;
+  padding: 8px 14px; margin: 8px 0 14px 0;
+  font-family: monospace; font-size: 13px;
+  border-radius: 0 4px 4px 0;
+}
+.finding-box {
+  background: #fffbeb; border-left: 4px solid #f59e0b;
+  padding: 10px 16px; margin: 10px 0 16px 0;
+  border-radius: 0 4px 4px 0;
+}
+.idea-box {
+  background: #f0fdf4; border-left: 4px solid #22c55e;
+  padding: 10px 16px; margin: 10px 0 16px 0;
+  border-radius: 0 4px 4px 0;
+}
+.file-tag {
+  background: #2c3e50; color: #ecf0f1;
+  padding: 2px 8px; border-radius: 3px;
+  font-size: 11px; font-family: monospace;
+}
+.warn-box {
+  background: #fff1f2; border-left: 4px solid #dc2626;
+  padding: 8px 14px; margin: 8px 0; border-radius: 0 4px 4px 0;
+}
+.plot-box {
+  background: #f0f4ff; border-left: 4px solid #6366f1;
+  padding: 8px 14px; margin: 10px 0 16px 0;
+  border-radius: 0 4px 4px 0; font-size: 13px;
+}
+.plot-box strong { color: #4338ca; }
+</style>
+
+---
+
+```{r setup-directory, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 12,
+  fig.height = 5
+)
+
+library(tidyverse)
+library(xts)
+library(patchwork)
+library(scales)
+library(ggrepel)
+library(here)
+
+select  <- dplyr::select
+filter  <- dplyr::filter
+arrange <- dplyr::arrange
+
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+xts_rel <- readRDS(here("02_data_processed/xts_rel.rds"))
+
+source(here("scripts/00_init_universe.R"))
+source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+source(here("scripts_spy_dd_regime/spy_dd_regime_rel.R"))
+source(here("scripts_spy_dd_regime/regime_multi_ticker.R"))
+source(here("scripts_saa_taa/saa_tree.R"))
+source(here("scripts_saa_taa/05_saa_portfolio.R"))
+source(here("key_plots/chart_ma_range.R"))
+source(here("scripts_what_happened/dynamics.R"))
+source(here("scripts_what_happened/regime_rank.R"))
+source(here("utility/plot_xts_pair.R"))
+
+spy_ret <- xts_ret[, "SPY"]
+rt      <- build_regime_table(spy_ret)
+
+saa_tk  <- c("AGG","URTH","SPY","QQQ","XLK","SMH")
+eq_tk   <- c("SPY","QQQ","XLK","SMH","URTH","XLV","XLU","XLP","GLD","IEF")
+```
+
+# 1 · Project in One Sentence
+
+A modular R research project that classifies ETF behaviour across three
+data-driven market regimes (Fall / Recovery / Consolidation) and uses those
+findings to build and monitor a concrete SAA portfolio with tactical overlays.
+
+---
+
+# 2 · Key Empirical Findings
+
+## KF1 — Anti-Diversification
+
+<span class="file-tag">key_findings/kf1_anti_diversification.R</span>
+
+<div class="finding-box">
+**For a long-only blended portfolio, MaxDD is NOT minimised by minimising
+correlation. It is minimised by minimising the ticker's own standalone drawdown.**
+
+A ticker with ρ = 0.8 and 15% DD beats a ticker with ρ = 0.1 and 40% DD.
+Low-ρ tickers systematically underperform the Magdon-Ismail theoretical prediction.
+High-ρ tickers (> 0.75) track theory closely.
+</div>
+
+**Implication:** Never add a "diversifier" to reduce portfolio DD without first
+checking its standalone drawdown. Conventional diversification theory breaks
+down for long-only portfolios.
+
+**Screen parameters:** full 96-ticker universe, SPY benchmark
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_corr_dd(exante_tbl)` — scatter: ρ vs MaxDD, colour by asset class — shows the anti-diversification failure visually<br>
+`plot_exante_quadrant(exante_tbl)` — return vs DD quadrant: low-ρ tickers cluster in the wrong quadrant
+</div>
+
+```{r fig-kf1, fig.cap="KF1 — Regime fingerprint: low-ρ tickers (GLD, IEF) show HEDGE/STABLE in Fall; high-ρ (XLK, SMH) show LOSS", fig.height=5}
+plot_regime_fingerprint_box(xts_ret,
+  c("GLD","IEF","XLU","XLP","XLV","SPY","URTH","QQQ","XLK","SMH"),
+  rt = rt, master = "SPY",
+  title = "KF1 — Low-ρ vs High-ρ: Regime Behaviour")
+```
+
+---
+
+## KF2 — L/S Pair Selection
+
+<span class="file-tag">key_findings/kf2_ls_pair_selection.R</span>
+
+<div class="finding-box">
+**To replace SPY weight via a long-ticker / short-SPY overlay, ρ > 0.75 is required.**
+Only SMH (IR = 0.90), XLK (IR = 0.51), QQQ (IR = 0.48) pass the dual screen.
+Non-equity assets (GLD, IEF, TLT) are standalone allocations — never L/S legs.
+</div>
+
+**Screen:** `RHO_SCREEN = 0.75  AND  spread MaxDD ≥ −30%`
+
+<div class="plot-box">
+**Useful plots**<br>
+`KF2-A` — Screening scatter: ρ vs spread MaxDD with valid-candidate zone shaded<br>
+`KF2-B` — IR ranking bar chart of high-ρ candidates (SMH / XLK / QQQ)<br>
+`KF2-C` — ΔMaxDD scatter: IR (x) vs ΔMaxDD (y), circle = P(spread > 0 over 63d)<br>
+`plot_xts_pair(xts_ret[,"SMH"], xts_ret[,"SPY"], ...)` — wealth + rolling ρ + DD comparison
+</div>
+
+```{r fig-kf2, fig.cap="KF2 — Only SMH/XLK/QQQ pass ρ>0.75 screen: they track SPY closely enough for L/S overlay", fig.height=5}
+plot_regime_fingerprint_box(xts_ret,
+  c("SPY","SMH","XLK","QQQ","GLD","IEF","TLT"),
+  rt = rt, master = "SPY",
+  title = "KF2 — L/S Candidates: must have ρ>0.75 and ALPHA in Recovery")
+```
+
+---
+
+## KF3 — Trend Reversal at Regime Transitions
+
+<span class="file-tag">key_findings/kf3_trend_reversal.R</span>
+
+<div class="finding-box">
+**Winner → Loser cohort reversals cluster at regime transitions.**
+Tickers that led in the prior regime consistently underperform in the new one,
+particularly at Fall → Recovery transitions.
+</div>
+
+**Parameters:** `LOOKBACK = 60d`, `PERSIST_N = 3 weeks`, `TRANSIT_WIN = 8 weeks`
+
+<div class="plot-box">
+**Useful plots**<br>
+`KF3 Plot A` — Transition matrix: winner → loser reversal rates at each regime boundary<br>
+`KF3 Plot B` — Reversal count by regime: bar chart of how often top-quintile tickers reverse<br>
+`KF3 Plot C` — Forward return post-reversal: distribution of returns in 8W after regime flip
+</div>
+
+```{r fig-kf3, fig.cap="KF3 — Cycle amplifiers show LOSS/ALPHA/ALPHA: sharpest losses in Fall, sharpest gains in Recovery", fig.height=5}
+plot_regime_multi_overlay(xts_ret,
+  tickers = c("SMH","XLK","QQQ"),
+  master  = "SPY",
+  relative = TRUE)
+```
+
+---
+
+## KF4 — Cycle Amplifiers (SMH / XLK / QQQ)
+
+<span class="file-tag">memory/project_cycle_amplifiers.md</span>
+
+<div class="finding-box">
+**LOSS / ALPHA / ALPHA pattern — confirmed for SMH, XLK, QQQ only.**
+These three exhibit the sharpest Fall losses and sharpest Recovery gains of any
+ticker in the universe. Pattern is exclusive to US tech/growth with β > 1.
+</div>
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_regime_fingerprint_box(xts_ret, c("SMH","XLK","QQQ","SPY","GLD","IEF"), rt)` — boxplot per regime: LOSS/ALPHA/ALPHA pattern visible immediately<br>
+`plot_regime_rel_heatmap(xts_ret, c("SMH","XLK","QQQ"), rt)` — episode-level heatmap: see every Fall as LOSS, every Recovery as ALPHA<br>
+`plot_regime_multi_overlay(xts_ret, c("SMH","XLK","QQQ"), master="SPY")` — relative return lines with regime shading
+</div>
+
+```{r fig-kf4, fig.cap="KF4 — LOSS/ALPHA/ALPHA pattern confirmed: SMH/XLK/QQQ dominate Recovery, suffer most in Fall", fig.height=5}
+plot_regime_fingerprint_box(xts_ret,
+  c("SMH","XLK","QQQ","SPY","GLD","IEF"),
+  rt = rt, master = "SPY",
+  title = "KF4 — Cycle Amplifiers: LOSS in Fall, ALPHA in Recovery")
+```
+
+---
+
+## KF5 — Regime-Rotation TAA Does NOT Beat Passive 60/40
+
+<span class="file-tag">CLAUDE.md § Critical analytical findings</span>
+
+<div class="warn-box">
+**Walk-forward DAA: ~6.7% ann. vs passive 60/40: ~7.6%.**
+Root causes: (1) international diversification drag during US-dominated decade;
+(2) regime detection lag — Fall fires only after 10% DD already absorbed;
+(3) tilts too small to overcome base drag.
+**Do NOT attempt to improve return via regime rotation. The correct objective is DD reduction.**
+</div>
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_multi_wealth_endlabel(list(DAA=..., SAA=..., Passive=...), rt)` — wealth comparison: DAA underperforms passive over full history<br>
+`plot_regime_overlay(xts_ret[,"SPY"], overlay_ret=daa_ret)` — SPY DD with DAA overlay: shows lag in regime detection
+</div>
+
+```{r fig-kf5, fig.cap="KF5 — SPY regime overlay: Fall fires only after 10% DD already absorbed — the detection lag that kills TAA", fig.height=5}
+plot_regime_overlay(xts_ret[,"SPY"], t_fall = 0.10, asset_name = "SPY")
+```
+
+---
+
+## KF6 — DD Overlay Objective
+
+<span class="file-tag">scripts_daa_saa_taa/07_dd_overlay_optimizer.R</span>
+
+<div class="idea-box">
+**The right question:** "What is the minimum-cost overlay that reduces MaxDD
+from ~23% to ~15% while accepting SPY/IEF 60/40 return?"
+
+Answer from Pareto frontier of all single/pair/triple combinations screened via
+`05_dd_stabilizer.R`. Grid search: singles 5–20%, pairs up to 25% total,
+triples (top 5) up to 25% total.
+</div>
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_dd_frontier(dd_frontier_data)` — arrowed paths: each ticker's DD vs return as overlay weight sweeps 0→25%; passive diamond anchor<br>
+`plot_multi_wealth_endlabel(target_solutions, rt)` — wealth curves for ≤15% / ≤17% / ≤19% / ≤21% MaxDD target solutions
+</div>
+
+```{r fig-kf6, fig.cap="KF6 — DD overlay candidates: Fall regime behaviour of the stabilizer universe", fig.height=5}
+stab_tk <- c("GLD","IEF","TLT","XLU","XLP","SH","BTAL")
+stab_tk <- intersect(stab_tk, colnames(xts_ret))
+plot_regime_fingerprint_box(xts_ret, stab_tk, rt = rt, master = "SPY",
+  title = "KF6 — DD Overlay Candidates: Fall Behaviour")
+```
+
+---
+
+# 3 · Core Analytical Framework
+
+## The Regime Engine
+
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime.R</span>
+
+Three-state regime based on SPY cumulative drawdown from running peak:
+
+| State | Trigger | Exit |
+|---|---|---|
+| **Fall** | DD crosses −10% | DD recovers to 0% |
+| **Recovery** | after Fall ends | SPY reaches new ATH |
+| **Consolidation** | everything else | — |
+
+<div class="fn-box">build_regime_table(xts_ret_col, t_fall = 0.10)</div>
+
+Returns one row per episode with regime / xmin / xmax / days / return.
+
+**Critical constant — never change without discussion:** `T_FALL = 0.10`
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_regime_overlay(xts_ret[,"SPY"])` — SPY price with Fall (red) / Recovery (green) shading + DD panel<br>
+`plot_regime_stats(xts_ret[,"SPY"])` — summary stats per regime: avg duration, avg return, count of episodes<br>
+`plot_regime_calendar(xts_ret[,"SPY"])` — calendar heatmap coloured by regime state
+</div>
+
+```{r fig-regime-engine, fig.cap="Regime Engine — SPY Fall/Recovery/Consolidation episodes since 2010", fig.height=5}
+plot_regime_overlay(xts_ret[,"SPY"], t_fall = 0.10, asset_name = "SPY")
+```
+
+---
+
+## Outperformance Type Taxonomy
+
+<span class="file-tag">scripts_spy_dd_regime/spy_dd_regime_rel.R</span>
+
+| Type | Condition | Meaning |
+|---|---|---|
+| **HEDGE** | α>0, abs>0, SPY<0 | Ticker rose while SPY fell |
+| **STABLE** | α>0, abs<0, SPY<0 | Both fell — ticker fell less |
+| **ALPHA** | α>0, SPY>0 | Both rose — ticker rose more |
+| **LAG** | α<0, SPY>0 | Underperformed rising SPY |
+| **LOSS** | α<0, SPY<0 | Both fell — ticker fell worse |
+
+Key functions:
+
+<div class="fn-box">plot_regime_fingerprint_box(xts_ret, tickers, rt, master="SPY")</div>
+<div class="fn-box">plot_regime_rel_heatmap(xts_ret, tickers, master="SPY", t_fall=0.10)</div>
+<div class="fn-box">get_regime_fingerprint(ticker, xts_ret, rt, master="SPY")</div>
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_regime_fingerprint_box()` — **primary view**: boxplot per ticker per regime; green = positive median alpha, red = negative; immediately shows XLP/XLU/XLV as Fall hedges and XLK as Recovery leader<br>
+`plot_regime_rel_heatmap()` — episode-level grid: each cell = one episode, colour = outperf_type; reveals consistency across cycles<br>
+`plot_fall_fingerprint()` — Fall only, sorted by mean alpha: who are the true hedges?<br>
+`plot_abs_alpha_regime()` — grouped bars: absolute return + alpha side by side per regime<br>
+`plot_regime_rel_summary()` — faceted avg alpha bars sorted within each regime
+</div>
+
+```{r fig-outperf, fig.cap="Outperformance Taxonomy — US Sectors: XLP/XLU/XLV are Fall hedges; XLK/SMH are Recovery amplifiers", fig.height=6}
+sector_tk <- intersect(
+  c("XLK","XLC","XLV","XLF","XLI","XLP","XLY","XLE","XLB","XLU","SPY"),
+  colnames(xts_ret))
+plot_regime_fingerprint_box(xts_ret, sector_tk, rt = rt, master = "SPY",
+  title = "US Sectors — Full Cycle Fingerprint")
+```
+
+---
+
+## The SAA Portfolio
+
+```r
+SAA_PORTFOLIO <- tribble(
+  ~ticker, ~weight, ~asset_class,  ~role,
+  "AGG",   0.35,    "Fixed Income", "Core-Stabilizer",
+  "URTH",  0.25,    "Equity",       "Anchor",
+  "SPY",   0.25,    "Equity",       "Anchor",
+  "QQQ",   0.05,    "Equity",       "Core-Growth",
+  "XLK",   0.05,    "Equity",       "Core-Growth",
+  "SMH",   0.05,    "Equity",       "Satellite"
+)
+# Equity 65% / Fixed Income 35%
+```
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_saa_ggbar(SAA_PORTFOLIO, xts_ret)` — bar chart of weights with YTD return annotations<br>
+`plot_saa_treemap()` + `plot_saa_sunburst()` — always shown as a pair: hierarchical weight decomposition<br>
+`plot_multi_wealth_endlabel(list(SAA=..., SPY=..., AGG=...), rt)` — SAA wealth vs components with regime shading<br>
+`plot_ma200_signal_panel(trend_signals, SAA_PORTFOLIO)` — 200DMA status grid for every SAA holding
+</div>
+
+```{r fig-saa, fig.cap="SAA Portfolio — weight composition by role", fig.height=4}
+SAA_PORTFOLIO <- tibble::tribble(
+  ~ticker, ~weight, ~asset_class,   ~role,
+  "AGG",   0.35,    "Fixed Income",  "Core-Stabilizer",
+  "URTH",  0.25,    "Equity",        "Anchor",
+  "SPY",   0.25,    "Equity",        "Anchor",
+  "QQQ",   0.05,    "Equity",        "Core-Growth",
+  "XLK",   0.05,    "Equity",        "Core-Growth",
+  "SMH",   0.05,    "Equity",        "Satellite"
+)
+plot_saa_ggbar(SAA_PORTFOLIO, xts_ret)
+```
+
+---
+
+# 4 · Chart Templates
+
+All templates live in `key_plots/`. Source the file, call the function.
+Full visual catalogue: `Rmd/plot_directory.Rmd`.
+
+## MA / Price Charts
+
+<span class="file-tag">key_plots/chart_ma_price.R</span>
+<span class="file-tag">key_plots/chart_ma_cumret.R</span>
+
+<div class="fn-box">plot_ma_chart(ticker, xts_price, from_date="2020-01-01", ma1=50, ma2=200, t_fall=0.10)</div>
+<div class="fn-box">plot_ma_cumret(ticker, xts_ret, from_date="2020-01-01", ma1=50, ma2=200, t_fall=0.10)</div>
+
+Two-panel patchwork: price/cumret + MA lines with amber/red ribbon shading; drawdown panel.
+
+## MA Range & Distance
+
+<span class="file-tag">key_plots/chart_ma_range.R</span>
+
+<div class="fn-box">plot_ma_range(ticker, xts_ret, from_date, ma1=50, ma2=200, win_52w=252, compact=FALSE)</div>
+
+3-panel (or 2-panel compact): cumret + 52W band / % distance from 52W Hi–Lo / % distance from MAs.
+
+## Price Position Ruler (Gauge) ★ canonical v3 — locked 2026-03-30
+
+<span class="file-tag">key_plots/chart_ma_range.R</span>
+
+<div class="fn-box">plot_ma_gauge(tickers, xts_ret, ma1=50, ma2=200, win_52w=252, flip=FALSE)</div>
+
+One horizontal ruler per ticker. All references expressed as % distance from current price (0% anchor).
+State classifier (6 states): Bear / Trending / Stretched / Pullback / Stressed / Correction.
+
+State colours:
+
+| State | Colour | Condition |
+|---|---|---|
+| Bear | `#7f1d1d` | > 20% below 52W Hi |
+| Trending | `#16a34a` | Above both MAs, shallow DD |
+| Stretched | `#38bdf8` | Above 200DMA, DD < 10% |
+| Pullback | `#fbbf24` | Below 50DMA, above 200DMA |
+| Stressed | `#f97316` | Below 200DMA, DD < 20% |
+| Correction | `#dc2626` | Otherwise |
+
+## SPC Control Chart
+
+<span class="file-tag">key_plots/chart_ma_range.R</span>
+
+<div class="fn-box">plot_gauge_spc(tickers, xts_ret, ma1=50, ma2=200, win_52w=252, sort_by="none")</div>
+
+Shewhart-inspired cross-sectional chart. Centre = 200DMA (0%). Zones: ±1σ green / ±2σ amber.
+Grey bar = 52W Hi–Lo. State-coloured lollipop = % from 200DMA. Orange circle = 50DMA.
+
+`sort_by = "norm_pos"` orders tickers oversold → overbought.
+
+**Conceptual precedent:** Shewhart control charts (1924) / phase diagrams / sufficient statistics (Fisher 1922).
+
+## Other Templates
+
+| Template | File | Function |
+|---|---|---|
+| Multi-wealth end-label | `chart_multi_wealth_endlabel.R` | `plot_multi_wealth_endlabel(ret_list, rt)` |
+| 200DMA signal panel | `chart_ma200_signal_panel.R` | `plot_ma200_signal_panel(trend_signals, saa_tbl)` |
+| Stacked weight timeline | `chart_stacked_weight_timeline.R` | `plot_stacked_weight_timeline(weight_tbl, saa_tbl, rt)` |
+| DD frontier | `chart_dd_frontier.R` | `plot_dd_frontier(dd_frontier_data)` |
+| P/E bands | `chart_pe_bands.R` | `plot_pe_bands(n_years=10)` |
+| Calendar heatmap | `calendar_heatmap.R` | `plot_calendar_heatmap(ticker, n_yr=5)` |
+| Stock return matrix | `chart_stock_matrix.R` | `plot_stock_matrix(from_yr=1900)` |
+
+---
+
+# 5 · Technical Posture Framework
+
+## Fingerprint Vector
+
+<span class="file-tag">key_plots/chart_ma_range.R</span>
+
+<div class="idea-box">
+**The sufficient statistic for tactical decisions:**
+`v = [state, d_52W_hi, d_200DMA, d_50DMA, dd_pct, d_52W_lo]`
+
+Discards price history that doesn't change the action.
+All distances in % from current price. Scale-free via z-score normalisation (÷ annualised σ).
+</div>
+
+<div class="fn-box">build_gauge_vectors(tickers, xts_ret, ma1=50, ma2=200, win_52w=252)</div>
+
+Returns tibble: `ticker | state | d_52w_hi | d_200dma | d_50dma | dd_pct | d_52w_lo | norm_pos | sigma | z_*`
+
+**norm_pos** ∈ [0, 1]: 0 = at 52W low, 1 = at 52W high. Use for sorting and ranking.
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_ma_gauge(saa_tickers, xts_ret)` — **primary snapshot**: one ruler per ticker, current posture at a glance<br>
+`plot_ma_gauge(..., flip=TRUE)` — horizontal layout for presentations<br>
+`plot_gauge_spc(saa_tickers, xts_ret, sort_by="norm_pos")` — SPC chart sorted oversold→overbought; zone bands show who is extended<br>
+`plot_ma_range(ticker, xts_ret)` — single-ticker deep-dive: cumret + 52W band + all distance panels<br>
+`plot_ma_cumret(ticker, xts_ret)` — single-ticker with MA crossover shading + drawdown panel
+</div>
+
+```{r fig-gauge, fig.cap="Price Position Ruler — canonical v3: state-coloured diamond, DD shading, 52W range bar", fig.height=4}
+plot_ma_gauge(saa_tk, xts_ret)
+```
+
+## Similarity Heatmap
+
+<div class="fn-box">plot_gauge_similarity(tickers, xts_ret, method="euclidean")</div>
+
+Pairwise Euclidean distance on z-score vector. Clustered by Ward D2.
+Blue = similar posture (concentration risk). Red = opposite posture (genuine diversification).
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_gauge_similarity(saa_tickers, xts_ret)` — **portfolio concentration check**: are your 6 SAA holdings truly independent or do 3 of them cluster?<br>
+`plot_gauge_similarity(universe_tickers, xts_ret)` — full universe: find genuine diversifiers (high distance from current SAA holdings)
+</div>
+
+```{r fig-similarity, fig.cap="Technical Posture Similarity — Euclidean distance on z-score vector; blue=similar (concentration risk)", fig.height=5}
+plot_gauge_similarity(saa_tk, xts_ret, method = "euclidean")
+```
+
+<div class="warn-box">
+**Cosine distance collapses to ~0 when all tickers are in the same regime** (same-direction z-vectors).
+Always use `method = "euclidean"` as default. Cosine only meaningful in mixed-regime universes.
+</div>
+
+## Daily Panel Tracker
+
+<span class="file-tag">scripts/gauge_panel_tracker.R</span>
+
+<div class="fn-box">log_gauge_snapshot(tickers, xts_ret)</div>
+<div class="fn-box">load_gauge_panel()</div>
+<div class="fn-box">plot_gauge_norm_pos(panel, tickers)</div>
+<div class="fn-box">plot_gauge_state_history(panel, tickers)</div>
+
+Logs daily fingerprint snapshots to `02_data_processed/gauge_panel.rds`.
+Add `log_gauge_snapshot()` to `master_run.R` for automatic daily logging.
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_gauge_norm_pos(panel, saa_tickers)` — time series of 52W position per ticker: are holdings drifting toward highs or lows over weeks?<br>
+`plot_gauge_state_history(panel, saa_tickers)` — **regime transition early warning**: tile chart shows when clusters of holdings flip state simultaneously
+</div>
+
+```{r fig-spc, fig.cap="SPC Control Chart — % from 200DMA with ±1σ/±2σ zones; sorted oversold→overbought", fig.height=5}
+plot_gauge_spc(saa_tk, xts_ret, sort_by = "norm_pos")
+```
+
+---
+
+# 6 · Subproject — What Has Happened
+
+*Goal: replace visual chart noise with structured, threshold-aware regime intelligence.*
+
+## Function A — The Dynamics
+
+<span class="file-tag">scripts_what_happened/dynamics.R</span>
+
+<div class="fn-box">build_dynamics(tickers, xts_ret, etf_metadata)</div>
+<div class="fn-box">plot_dynamics(dyn, groups=NULL, periods=c("WTD","MTD","QTD","YTD"))</div>
+
+Returns period returns (WTD / MTD / QTD / YTD) for all tickers grouped by **factor style**:
+
+`US Momentum | Cyclical Growth | Cyclical Value | Quality | Defensive |
+Global Equity | DM Intl | Emerging Markets | FI Gov | FI Credit |
+Inflation Shield | Real Estate | Alternatives | FX | Biotech | Defense`
+
+Visualisation: red/green heatmap grouped by factor style, sorted by YTD within each group.
+Reading: which rows are green across all 4 periods = what the market is rewarding right now.
+
+```r
+dyn <- build_dynamics(colnames(xts_ret), xts_ret, etf_metadata)
+plot_dynamics(dyn)
+plot_dynamics(dyn, groups = c("US Momentum","Cyclical Growth","Cyclical Value",
+                               "Quality","Defensive","Global Equity"))
+```
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_dynamics(dyn)` — **full universe heatmap**: which factor styles are green across WTD/MTD/QTD/YTD = the Zeitgeist<br>
+`plot_dynamics(dyn, groups=c("US Momentum","Cyclical Growth","Cyclical Value","Quality","Defensive"))` — equity styles only: factor rotation snapshot<br>
+`plot_dynamics(dyn, groups=c("FI Gov","FI Credit","Inflation Shield"))` — fixed income + real assets: flight-to-safety vs risk-on in bonds
+</div>
+
+```{r fig-dynamics, fig.cap="The Dynamics — period returns by factor style: read green rows = what the market rewards now", fig.height=7}
+dyn <- build_dynamics(colnames(xts_ret), xts_ret, etf_metadata)
+plot_dynamics(dyn, groups = c("US Momentum","Cyclical Growth","Cyclical Value",
+                               "Quality","Defensive","Global Equity",
+                               "FI Gov","FI Credit","Inflation Shield"))
+```
+
+## Function B — Regime Rank
+
+<span class="file-tag">scripts_what_happened/regime_rank.R</span>
+
+<div class="fn-box">rank_regime_etfs(tickers, xts_ret, rt, master="SPY", n_top=NULL, etf_metadata=NULL, asset_class=NULL, pf_function=NULL)</div>
+<div class="fn-box">plot_regime_rank(ranking_tbl, n_top=15)</div>
+
+Ranks every ETF by usefulness in each regime using composite score:
+
+| Regime | Score weights |
+|---|---|
+| Fall | 60% mean_alpha + 40% consistency |
+| Recovery | 70% mean_abs_ret + 30% mean_alpha |
+| Consolidation | 50% mean_alpha + 50% consistency |
+
+`consistency` = % of historical episodes with positive alpha (robustness signal).
+
+```r
+# Equities only, Fall ranking
+rk <- rank_regime_etfs(tk, xts_ret, rt,
+                        etf_metadata = etf_metadata,
+                        asset_class  = "Equity")
+plot_regime_rank(rk %>% filter(regime == "Fall"), n_top = 12)
+
+# Fixed income vs IEF benchmark
+rk_fi <- rank_regime_etfs(tk, xts_ret, rt,
+                           master       = "IEF",
+                           etf_metadata = etf_metadata,
+                           asset_class  = "FixedIncome")
+plot_regime_rank(rk_fi)
+```
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_regime_rank(rk, n_top=12)` — **3-panel lollipop**: top N per regime coloured by HEDGE/STABLE/ALPHA/LAG/LOSS; read Fall panel to find hedges, Recovery panel to find amplifiers<br>
+`plot_regime_rank(rk %>% filter(regime=="Fall"), n_top=15)` — Fall only: who are the true hedges ranked by alpha + consistency?<br>
+`plot_regime_fingerprint_box()` — complementary view: same data as boxplots for visual confirmation
+</div>
+
+```{r fig-regime-rank, fig.cap="Regime Rank — top ETFs by usefulness per regime: Fall hedges / Recovery amplifiers / Consolidation alpha", fig.height=6}
+rk <- rank_regime_etfs(
+  intersect(etf_metadata$ticker, colnames(xts_ret)),
+  xts_ret, rt,
+  etf_metadata = etf_metadata,
+  asset_class  = "Equity"
+)
+plot_regime_rank(rk, n_top = 10)
+```
+
+---
+
+# 7 · Market State Framework (3 Layers)
+
+<span class="file-tag">scripts_market_state/</span>
+
+| Layer | Function | Output |
+|---|---|---|
+| L1 Vector State | `build_market_state_history(xts_ret)` | 5 states: Expansion / US-Led / Late-Cycle / Deterioration / Contraction |
+| L2 Sector Pattern | `build_sector_pattern_history(xts_ret)` | Cyclical vs Defensive momentum → Risk-On/Off |
+| L3 Risk Allocation | `build_risk_allocation_history(xts_ret)` | Final EQ/FI weight [25%–75%] |
+
+5 signals driving L1: URTH regime | SPY regime | US premium (60d) | EM appetite (60d) | sector breadth
+
+```r
+plot_ms_dashboard(xts_ret)    # 3-panel patchwork summary
+print_market_state(ms_hist)   # console current state
+print_risk_allocation(ra_hist) # current EQ/FI
+```
+
+<div class="plot-box">
+**Useful plots**<br>
+`plot_ms_dashboard(xts_ret)` — **primary view**: 3-panel patchwork — L1 state timeline / L2 sector pattern / L3 EQ-FI allocation history<br>
+`plot_ms_timeline(ms_hist)` — L1 state history as coloured bands: when did we transition between Expansion/US-Led/Late-Cycle/Deterioration/Contraction?<br>
+`plot_ms_signal_strip(ms_hist)` — 5 individual signal strips: see which signals are driving the current state<br>
+`plot_ms_allocation(ra_hist)` — L3 EQ/FI weight history: how has the recommended allocation shifted over time?
+</div>
+
+```{r fig-market-state, fig.cap="Market State Dashboard — L1 vector state / L2 sector pattern / L3 EQ-FI allocation", fig.height=6}
+source(here("scripts_market_state/ms_vector_state.R"))
+source(here("scripts_market_state/ms_sector_pattern.R"))
+source(here("scripts_market_state/ms_risk_allocation.R"))
+source(here("scripts_market_state/ms_visuals.R"))
+plot_ms_dashboard(xts_ret)
+```
+
+---
+
+# 8 · Session Startup Sequence
+
+```r
+source("00_libraries.R")                         # packages + build_regime_table()
+source(here("scripts/00_init_universe.R"))        # etf_metadata (108 tickers)
+source(here("scripts/01_etf_wrangle.R"))          # xts_ret, xts_ret_winsor, xts_rel
+rt <- build_regime_table(xts_ret[, "SPY"])        # explicit assign — avoids stats::rt shadow
+
+# Gauge framework
+source(here("key_plots/chart_ma_range.R"))        # plot_ma_gauge, plot_gauge_spc,
+                                                   # build_gauge_vectors, plot_gauge_similarity
+
+# What Has Happened
+source(here("scripts_spy_dd_regime/spy_dd_regime_rel.R"))
+source(here("scripts_what_happened/dynamics.R"))
+source(here("scripts_what_happened/regime_rank.R"))
+```
+
+---
+
+# 9 · Critical Rules (Never Violate)
+
+<div class="warn-box">
+
+1. **T_FALL = 0.10** — never change the regime threshold without discussion
+2. **Objective is DD reduction, not return maximisation** — confirmed by KF5
+3. **Low ρ ≠ low portfolio DD** — confirmed by KF1
+4. **Sunburst + treemap are always a pair** — update/show both together
+5. **xts_ret_winsor for sigma/z-scores only** — distorts cumulative returns
+6. **rt ← build_regime_table(...)** — must assign explicitly (stats::rt shadows)
+7. **Always use here::here() + envir=new.env() for parameterised Rmd renders**
+8. **Never show a 3-state transition matrix** — trivially 100% by construction
+
+</div>
+
+---
+
+# 10 · Universe Quick Reference
+
+108-ticker Sovereign Universe. Key fields in `etf_metadata`:
+
+| Field | Values |
+|---|---|
+| `asset_class` | Equity / FixedIncome / Commodity / FX / RealAsset / MultiAsset / Alternative |
+| `tree_level` | L1_World / L2_Region / L3_Country / L3_Sector / Factor / Satellite / FI_Gov / … |
+| `pf_function` | Anchor / Core-Growth / Core-Stabilizer / Core-Income / Core-Factor / Tactical / Real-Shield / Satellite / DAA |
+| `geo` | US / Global / DM / EM / Multi |
+
+```r
+# Quick filters
+etf_metadata %>% filter(asset_class == "Equity", pf_function == "Anchor")
+etf_metadata %>% filter(tree_level == "L3_Sector")
+etf_metadata %>% filter(pf_function == "DAA")
+```

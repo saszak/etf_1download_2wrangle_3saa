@@ -1,0 +1,343 @@
+---
+title: "Phase 2.1 — DD Stabilizer Screen"
+subtitle: "Baseline: 6040Classic (60% SPY + 40% IEF)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+params:
+  w_eq:          0.60
+  w_fi:          0.40
+  screen_weight: 0.10
+  roll_win:      63
+  n_select:      6
+  rho_max:       0.80
+  full_corr_thr: -0.10
+  part_corr_thr: 0.30
+---
+
+```{css, echo=FALSE}
+.finding-box {
+  background: #f0f9ff;
+  border-left: 4px solid #2563eb;
+  padding: 10px 16px;
+  margin: 12px 0;
+  font-size: 0.92em;
+}
+.type-full  { background:#dbeafe; border-left:4px solid #1d4ed8; padding:6px 14px; margin:6px 0; }
+.type-part  { background:#fef9c3; border-left:4px solid #ca8a04; padding:6px 14px; margin:6px 0; }
+.type-cond  { background:#fce7f3; border-left:4px solid #db2777; padding:6px 14px; margin:6px 0; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 6
+)
+
+library(tidyverse)
+library(xts)
+library(zoo)
+library(patchwork)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(here)
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+if (!exists("project_tree"))       source(here("project_tree.R"))
+if (!exists("etf_metadata"))       source(here(project_tree$scripts$init))
+if (!exists("xts_ret"))            source(here(project_tree$scripts$wrangle))
+if (!exists("build_regime_table")) source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+if (!exists("rt") || !is.data.frame(rt))
+  rt <- build_regime_table(xts_ret[, "SPY"])
+if (!exists("plot_xts_pair"))      source(here("utility/plot_xts_pair.R"))
+
+# Override script-level params from Rmd params before sourcing
+W_EQ           <- params$w_eq
+W_FI           <- params$w_fi
+SCREEN_WEIGHT  <- params$screen_weight
+ROLL_WIN       <- as.integer(params$roll_win)
+N_SELECT       <- as.integer(params$n_select)
+RHO_MAX        <- params$rho_max
+FULL_CORR_THR  <- params$full_corr_thr
+PART_CORR_THR  <- params$part_corr_thr
+BASELINE_LABEL <- sprintf("%d/%d Classic",
+                           round(params$w_eq * 100), round(params$w_fi * 100))
+
+# Source the pipeline — knitr.in.progress guard prevents auto-run block from executing
+source(here("scripts_daa_saa_taa/05_dd_stabilizer.R"))
+
+# Run the three-stage pipeline
+stab <- find_stabilizers(
+  xts_ret        = xts_ret,
+  rt             = rt,
+  w_eq           = W_EQ,
+  w_fi           = W_FI,
+  baseline_label = BASELINE_LABEL,
+  screen_weight  = SCREEN_WEIGHT,
+  roll_win       = ROLL_WIN,
+  n_select       = N_SELECT,
+  rho_max        = RHO_MAX,
+  full_corr_thr  = FULL_CORR_THR,
+  part_corr_thr  = PART_CORR_THR
+)
+
+stabilizer_candidates  <- stab$candidates
+stabilizer_scores      <- stab$scores
+selected_stabilizers   <- stab$selected
+baseline_xts           <- stab$baseline
+
+# DD frontier sweep data
+stab_frontier <- build_dd_frontier_data(
+  stabilizer_candidates,
+  xts_ret,
+  baseline_xts
+)
+
+baseline_dd  <- .max_dd(baseline_xts)
+baseline_ret <- .ann_ret(baseline_xts)
+cur_regime   <- unique(stabilizer_scores$cur_regime)[1]
+```
+
+---
+
+## Framework
+
+::: {.finding-box}
+**Phase 2.1 objective:** *Given 6040Classic as our SAA, find the minimum-cost overlay
+that reduces MaxDD — with maximum Fall protection efficiency.*
+
+**Key difference from Phase 2.2 (Enhancer):**
+Phase 2.2 seeks return *above* the baseline. Phase 2.1 seeks drawdown *below* the baseline.
+A stabilizer may sacrifice some return in exchange for a shallower crash profile.
+:::
+
+### Baseline: `r BASELINE_LABEL`
+
+| Metric | Value |
+|---|---|
+| Composition | `r round(W_EQ*100)`% SPY + `r round(W_FI*100)`% IEF |
+| Annualised Return | `r sprintf("%+.1f%%", baseline_ret * 100)` |
+| MaxDD | `r sprintf("%.1f%%", baseline_dd * 100)` |
+| Current SPY Regime | **`r cur_regime`** |
+
+### Hedge type taxonomy
+
+<div class="type-full">**FULL** — `fall_corr ≤ r FULL_CORR_THR`: negatively correlated with baseline in Fall.
+True crisis hedge. Likely to *appreciate* when SPY falls (e.g. GLD, SHY, IEF-type assets).</div>
+
+<div class="type-part">**PARTIAL** — `r FULL_CORR_THR < fall_corr ≤ r PART_CORR_THR`: uncorrelated to weakly positive in Fall.
+Reduces DD through low-correlation portfolio math, but does not actively hedge (e.g. trend-following, commodities).</div>
+
+<div class="type-cond">**CONDITIONAL** — `fall_corr > r PART_CORR_THR`: positive Fall correlation but still reduces MaxDD
+at the portfolio level via dilution or timing effects. Use with caution — limited crisis protection.</div>
+
+### Three-stage pipeline
+
+| Stage | Function | Cadence | Purpose |
+|---|---|---|---|
+| 1 | `build_stabilizer_candidates()` | Quarterly | Screen all tickers: dd_reduction > 0 at `r round(SCREEN_WEIGHT*100)`%. Assign hedge type. |
+| 2 | `score_stabilizer_context()` | Monthly | Score on 4 current signals. Composite → stabilizer_score 0–100. |
+| 3 | `select_stabilizers()` | Monthly | Top-N with ρ ≤ `r RHO_MAX` pairwise guard. |
+
+### Stage 2 signals (equal-weight rank sum)
+
+| ID | Signal | Direction |
+|---|---|---|
+| s1 | Rolling 63d correlation vs baseline | Lower = better (inverted before ranking) |
+| s2 | Historical Fall DD reduction at `r round(SCREEN_WEIGHT*100)`% | Higher = better |
+| s3 | Own 200DMA trend signal | Higher = asset trending (optional — skipped if unavailable) |
+| s4 | Own 63d annualised return | Higher = stabilizer currently "working" |
+
+---
+
+## Stage 1 — Candidates (`r nrow(stabilizer_candidates)` tickers)
+
+```{r stage1-table}
+type_colours <- c("FULL" = "#dbeafe", "PARTIAL" = "#fef9c3", "CONDITIONAL" = "#fce7f3")
+
+stabilizer_candidates %>%
+  mutate(
+    dd_reduction    = sprintf("%+.1f pp", dd_reduction    * 100),
+    fall_dd_red     = sprintf("%+.1f pp", fall_dd_reduction * 100),
+    return_drag     = sprintf("%+.1f pp", return_drag     * 100),
+    insurance_ratio = sprintf("%.2f",     insurance_ratio),
+    fall_corr       = sprintf("%+.2f",    fall_corr),
+    own_maxdd       = sprintf("%.1f%%",   own_maxdd       * 100),
+    own_ret         = sprintf("%+.1f%%",  own_ret         * 100)
+  ) %>%
+  select(ticker, asset_class, hedge_type,
+         dd_reduction, fall_dd_red, return_drag,
+         insurance_ratio, fall_corr, own_maxdd, own_ret, n_days) %>%
+  kable(
+    col.names = c("Ticker", "Asset class", "Hedge type",
+                  "DD Red", "Fall DD Red", "Return drag",
+                  "Ins ratio", "Fall ρ", "Own MaxDD", "Own Ret", "N days"),
+    align = "lllrrrrrrrl"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) %>%
+  row_spec(
+    which(stabilizer_candidates$hedge_type == "FULL"),
+    background = "#dbeafe"
+  ) %>%
+  row_spec(
+    which(stabilizer_candidates$hedge_type == "PARTIAL"),
+    background = "#fef9c3"
+  ) %>%
+  row_spec(
+    which(stabilizer_candidates$hedge_type == "CONDITIONAL"),
+    background = "#fce7f3"
+  )
+```
+
+---
+
+## Stage 2 — Context scores (current regime: `r cur_regime`)
+
+```{r stage2-table}
+stabilizer_scores %>%
+  arrange(desc(stabilizer_score)) %>%
+  mutate(
+    stabilizer_score = sprintf("%.1f",   stabilizer_score),
+    rolling_corr_63d = sprintf("%+.2f",  rolling_corr_63d),
+    fall_dd_red      = sprintf("%+.1f pp", fall_dd_red * 100),
+    trend_f          = if_else(is.na(trend_on), "n/a", if_else(trend_on == 1, "ON", "OFF")),
+    own_mom          = sprintf("%+.1f%%", own_momentum_63d * 100),
+    dd_red_f         = sprintf("%+.1f pp", dd_reduction * 100),
+    ins_f            = sprintf("%.2f",   insurance_ratio),
+    fall_corr_f      = sprintf("%+.2f",  fall_corr)
+  ) %>%
+  select(ticker, asset_class, hedge_type, stabilizer_score,
+         rolling_corr_63d, fall_dd_red, trend_f, own_mom,
+         dd_red_f, ins_f, fall_corr_f) %>%
+  kable(
+    col.names = c("Ticker", "Asset class", "Hedge type", "Score",
+                  "Roll ρ 63d", "Fall DD Red", "200DMA", "Own Mom 63d",
+                  "DD Red", "Ins ratio", "Fall ρ"),
+    align = "lllrrrrrrrr"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) %>%
+  row_spec(
+    which(stabilizer_scores %>% arrange(desc(stabilizer_score)) %>%
+          pull(hedge_type) == "FULL"),
+    background = "#dbeafe"
+  ) %>%
+  row_spec(
+    which(stabilizer_scores %>% arrange(desc(stabilizer_score)) %>%
+          pull(hedge_type) == "PARTIAL"),
+    background = "#fef9c3"
+  )
+```
+
+---
+
+## Stage 3 — Selected stabilizers (`r nrow(selected_stabilizers)` tickers)
+
+```{r stage3-table}
+selected_stabilizers %>%
+  mutate(
+    stabilizer_score = sprintf("%.1f",   stabilizer_score),
+    dd_red_f         = sprintf("%+.1f pp", dd_reduction    * 100),
+    fall_dd_f        = sprintf("%+.1f pp", fall_dd_reduction * 100),
+    drag_f           = sprintf("%+.1f pp", return_drag     * 100),
+    ins_f            = sprintf("%.2f",   insurance_ratio),
+    fall_corr_f      = sprintf("%+.2f",  fall_corr),
+    roll_corr_f      = sprintf("%+.2f",  rolling_corr_63d),
+    trend_f          = if_else(is.na(trend_on), "n/a", if_else(trend_on == 1, "ON", "OFF")),
+    momentum_f       = sprintf("%+.1f%%", own_momentum_63d * 100)
+  ) %>%
+  select(rank, ticker, name, asset_class, hedge_type, stabilizer_score,
+         dd_red_f, fall_dd_f, drag_f, ins_f, fall_corr_f, roll_corr_f,
+         trend_f, momentum_f) %>%
+  kable(
+    col.names = c("#", "Ticker", "Name", "Asset class", "Hedge type", "Score",
+                  "DD Red", "Fall DD Red", "Drag", "Ins ratio",
+                  "Fall ρ", "Roll ρ 63d", "200DMA", "Own Mom"),
+    align = "rlllllrrrrrrrr"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) %>%
+  row_spec(
+    which(selected_stabilizers$hedge_type == "FULL"),
+    background = "#dbeafe"
+  ) %>%
+  row_spec(
+    which(selected_stabilizers$hedge_type == "PARTIAL"),
+    background = "#fef9c3"
+  )
+```
+
+---
+
+## Insurance Quadrant
+
+```{r insurance-quad, fig.height=7, echo=TRUE}
+# plot_stabilizer_quad(stabilizer_candidates)
+plot_stabilizer_quad(stabilizer_candidates)
+```
+
+---
+
+## DD Frontier — overlay weight 0% → 25%
+
+```{r dd-frontier, fig.height=6, echo=TRUE}
+# plot_dd_frontier(stab_frontier)
+plot_dd_frontier(stab_frontier)
+```
+
+---
+
+## Sleeve wealth charts
+
+```{r sleeve-charts, fig.height=5, results='asis', echo=TRUE}
+# plot_stabilizer_sleeves(selected_stabilizers, xts_ret, rt)
+plot_stabilizer_sleeves(selected_stabilizers, xts_ret, rt)
+```
+
+---
+
+## Ticker fingerprints
+
+9-panel fingerprint for each selected stabilizer vs `r BASELINE_LABEL`.
+Panels: 1. Wealth | 2. L/S Spread | 3. Rolling L/S | 4. DD | 5. 250d Return |
+6. IR | 7. Rolling ρ | 8. Regime ρ | 9. Distribution
+
+```{r fingerprints, fig.height=21, results='asis', echo=TRUE}
+# plot_stabilizer_pairs(selected_stabilizers, xts_ret, rt, save_png = FALSE)
+plot_stabilizer_pairs(
+  selected_stabilizers = selected_stabilizers,
+  xts_ret              = xts_ret,
+  rt                   = rt,
+  baseline_label       = BASELINE_LABEL,
+  save_png             = FALSE
+)
+```
+
+---
+
+## Session info
+
+```{r session}
+cat(sprintf("Report date   : %s\n", Sys.Date()))
+cat(sprintf("Baseline      : %s (%.0f%% SPY + %.0f%% IEF)\n",
+            BASELINE_LABEL, W_EQ*100, W_FI*100))
+cat(sprintf("Screen weight : %.0f%%\n", SCREEN_WEIGHT * 100))
+cat(sprintf("Roll window   : %d days\n", ROLL_WIN))
+cat(sprintf("N selected    : %d  (rho_max = %.2f)\n", N_SELECT, RHO_MAX))
+cat(sprintf("Hedge types   : FULL ρ ≤ %.2f  |  PARTIAL ρ ≤ %.2f  |  CONDITIONAL otherwise\n",
+            FULL_CORR_THR, PART_CORR_THR))
+cat(sprintf("Current regime: %s\n", cur_regime))
+cat(sprintf("Candidates    : %d  →  Scored: %d  →  Selected: %d\n",
+            nrow(stabilizer_candidates), nrow(stabilizer_scores),
+            nrow(selected_stabilizers)))
+```

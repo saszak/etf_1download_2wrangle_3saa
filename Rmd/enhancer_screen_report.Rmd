@@ -1,0 +1,289 @@
+---
+title: "Phase 2.2 — Overlay Enhancer Screen"
+subtitle: "Baseline: 6040Classic (60% SPY + 40% IEF)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+params:
+  w_eq:           0.60
+  w_fi:           0.40
+  ir_floor:       0.20
+  fall_tolerance: -0.02
+  roll_win:       63
+  n_select:       8
+  rho_max:        1.00
+---
+
+```{css, echo=FALSE}
+.finding-box {
+  background: #f0f9ff;
+  border-left: 4px solid #2563eb;
+  padding: 10px 16px;
+  margin: 12px 0;
+  font-size: 0.92em;
+}
+.type-a { background:#dcfce7; border-left:4px solid #16a34a; padding:6px 14px; margin:6px 0; }
+.type-b { background:#fef9c3; border-left:4px solid #ca8a04; padding:6px 14px; margin:6px 0; }
+.type-c { background:#ede9fe; border-left:4px solid #7c3aed; padding:6px 14px; margin:6px 0; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 6
+)
+
+library(tidyverse)
+library(xts)
+library(zoo)
+library(patchwork)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(here)
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+if (!exists("project_tree"))       source(here("project_tree.R"))
+if (!exists("etf_metadata"))       source(here(project_tree$scripts$init))
+if (!exists("xts_ret"))            source(here(project_tree$scripts$wrangle))
+if (!exists("build_regime_table")) source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+if (!exists("rt") || !is.data.frame(rt))
+  rt <- build_regime_table(xts_ret[, "SPY"])
+if (!exists("plot_xts_pair"))      source(here("utility/plot_xts_pair.R"))
+
+# Override script-level params from Rmd params before sourcing
+W_EQ           <- params$w_eq
+W_FI           <- params$w_fi
+IR_FLOOR       <- params$ir_floor
+FALL_TOLERANCE <- params$fall_tolerance
+ROLL_WIN       <- as.integer(params$roll_win)
+N_SELECT       <- as.integer(params$n_select)
+RHO_MAX        <- params$rho_max
+BASELINE_LABEL <- sprintf("%d/%d Classic",
+                           round(params$w_eq * 100), round(params$w_fi * 100))
+
+# Source the screen — auto-run block is guarded by knitr.in.progress
+source(here("scripts_daa_saa_taa/08_enhancer_screen.R"))
+# After sourcing, these objects are available:
+#   enhancer_candidates  — Stage 1 watchlist + trigger_type (A/B)
+#   enhancer_scores      — Stage 2 context scores + trigger_type_final (A/B/C)
+#   selected_enhancers   — Stage 3 final selection
+#
+# To replicate interactively in RStudio:
+#   enhancer_candidates <- build_enhancer_candidates(xts_ret, rt)
+#   enhancer_scores     <- score_current_context(enhancer_candidates, xts_ret, rt)
+#   selected_enhancers  <- select_enhancers(enhancer_scores, xts_ret)
+```
+
+---
+
+## 1. Framework
+
+<div class="finding-box">
+**Phase 1.0 baseline fixed:** `r BASELINE_LABEL` = `r round(params$w_eq*100)`% SPY + `r round(params$w_fi*100)`% IEF, buy-and-hold.
+
+An enhancer at weight *w* means: **(1 − w) × `r BASELINE_LABEL` + w × TICKER**
+
+All spreads, IR, and excess returns on this page are computed vs `r BASELINE_LABEL`, not raw SPY.
+Regime detection uses SPY via `build_regime_table()` — unchanged.
+</div>
+
+### Trigger types
+
+<div class="type-a">**Type A — Unconditional.** Fall excess vs baseline ≥ `r params$fall_tolerance*100`pp. Hold at fixed weight at all times.</div>
+<div class="type-b">**Type B — Regime-conditional.** Fall excess < `r params$fall_tolerance*100`pp. Hold only during Recovery + Consolidation; revert to `r BASELINE_LABEL` in Fall.</div>
+<div class="type-c">**Type C — 200DMA signal.** Type B ticker with live `trend_signals` data. Use 200DMA trend filter instead of hard regime switch — finer entry/exit, whipsaw cost applies.</div>
+
+---
+
+## 2. Stage 1 — Candidate Watchlist
+
+```{r stage1-table}
+enhancer_candidates %>%
+  mutate(
+    full_ir         = round(full_ir, 2),
+    full_excess_ann = scales::percent(full_excess_ann, accuracy = 0.1),
+    fall_excess_ann = scales::percent(fall_excess_ann, accuracy = 0.1),
+    recov_excess_ann= scales::percent(recov_excess_ann, accuracy = 0.1),
+    cons_excess_ann = scales::percent(cons_excess_ann, accuracy = 0.1)
+  ) %>%
+  select(
+    Ticker       = ticker,
+    Trigger      = trigger_type,
+    Name         = name,
+    `Asset Class`= asset_class,
+    `Full IR`    = full_ir,
+    `Full Excess`= full_excess_ann,
+    `Fall α`     = fall_excess_ann,
+    `Recov α`    = recov_excess_ann,
+    `Cons α`     = cons_excess_ann,
+    Days         = n_days
+  ) %>%
+  kbl(caption = sprintf("Stage 1 candidates vs %s (IR floor = %.2f)", BASELINE_LABEL, IR_FLOOR)) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), font_size = 12) %>%
+  row_spec(which(enhancer_candidates$trigger_type == "A"),
+           background = "#f0fdf4") %>%
+  row_spec(which(enhancer_candidates$trigger_type == "B"),
+           background = "#fefce8")
+```
+
+**`r nrow(enhancer_candidates)` candidates admitted** —
+`r sum(enhancer_candidates$trigger_type == "A")` Type A (unconditional),
+`r sum(enhancer_candidates$trigger_type == "B")` Type B (regime-conditional).
+
+---
+
+## 3. Stage 2 — Context Scores
+
+Current SPY regime: **`r unique(enhancer_scores$cur_regime)`**
+
+```{r stage2-table}
+enhancer_scores %>%
+  mutate(
+    context_score  = round(context_score, 1),
+    rolling_ir     = round(rolling_ir, 2),
+    regime_excess  = scales::percent(regime_excess, accuracy = 0.1),
+    spread_momentum= round(spread_momentum, 5),
+    trend_f        = if_else(is.na(trend_on), "n/a",
+                             if_else(trend_on == 1, "✓ ON", "✗ OFF"))
+  ) %>%
+  select(
+    Ticker         = ticker,
+    `Trigger Final`= trigger_label,
+    `Ctx Score`    = context_score,
+    `Roll IR 63d`  = rolling_ir,
+    `Regime α`     = regime_excess,
+    `200DMA`       = trend_f,
+    Momentum       = spread_momentum,
+    `Asset Class`  = asset_class
+  ) %>%
+  kbl(caption = sprintf("Stage 2 context scores — regime: %s | baseline: %s",
+                        unique(enhancer_scores$cur_regime), BASELINE_LABEL)) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), font_size = 12) %>%
+  row_spec(which(enhancer_scores$trigger_type_final == "A"), background = "#f0fdf4") %>%
+  row_spec(which(enhancer_scores$trigger_type_final == "B"), background = "#fefce8") %>%
+  row_spec(which(enhancer_scores$trigger_type_final == "C"), background = "#f5f3ff")
+```
+
+---
+
+## 4. Stage 3 — Selected Enhancers
+
+```{r stage3-table}
+selected_enhancers %>%
+  mutate(
+    context_score   = round(context_score, 1),
+    full_ir         = round(full_ir, 2),
+    fall_excess_ann = scales::percent(fall_excess_ann, accuracy = 0.1),
+    recov_excess_ann= scales::percent(recov_excess_ann, accuracy = 0.1),
+    rolling_ir      = round(rolling_ir, 2),
+    regime_excess   = scales::percent(regime_excess, accuracy = 0.1),
+    trend_f         = if_else(is.na(trend_on), "n/a",
+                              if_else(trend_on == 1, "✓ ON", "✗ OFF"))
+  ) %>%
+  select(
+    `#`            = rank,
+    Ticker         = ticker,
+    Trigger        = trigger_label,
+    `Ctx Score`    = context_score,
+    `Full IR`      = full_ir,
+    `Fall α`       = fall_excess_ann,
+    `Recov α`      = recov_excess_ann,
+    `Roll IR 63d`  = rolling_ir,
+    `Regime α`     = regime_excess,
+    `200DMA`       = trend_f,
+    `Asset Class`  = asset_class
+  ) %>%
+  kbl(caption = sprintf("Stage 3 selection — top %d enhancers vs %s",
+                        nrow(selected_enhancers), BASELINE_LABEL)) %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"), font_size = 13) %>%
+  row_spec(0, bold = TRUE) %>%
+  row_spec(which(selected_enhancers$trigger_type_final == "A"), background = "#f0fdf4") %>%
+  row_spec(which(selected_enhancers$trigger_type_final == "B"), background = "#fefce8") %>%
+  row_spec(which(selected_enhancers$trigger_type_final == "C"), background = "#f5f3ff")
+```
+
+---
+
+## 5. Sleeve Wealth Charts
+
+One chart per asset class. Grey line = `r BASELINE_LABEL`. Coloured lines = selected enhancers. Background thin grey = other Stage 1 candidates in the same sleeve.
+
+```{r sleeve-charts, echo=TRUE, fig.height=7, fig.width=13}
+plot_enhancer_sleeves(
+  selected_enhancers,
+  xts_ret,
+  rt,
+  w_eq                = W_EQ,
+  w_fi                = W_FI,
+  baseline_label      = BASELINE_LABEL,
+  show_candidates     = TRUE,
+  enhancer_candidates = enhancer_candidates
+)
+```
+
+---
+
+## 6. Pair Analysis — Selected Enhancers vs `r BASELINE_LABEL`
+
+Each panel = 3-plot patchwork (wealth | spread | drawdown). Regime shading: pink = Fall, green = Recovery.
+
+```{r pair-plots, echo=TRUE, fig.height=21, fig.width=13, results='asis'}
+for (i in seq_len(nrow(selected_enhancers))) {
+  row <- selected_enhancers[i, ]
+  tk  <- row$ticker
+  trig <- row$trigger_label
+
+  cat(sprintf("\n### %d. %s — %s\n\n", i, tk, trig))
+
+  baseline_xts <- .build_baseline(xts_ret, W_EQ, W_FI, BASELINE_LABEL)
+  pfx <- sprintf("[#%d | Score %.1f | %s | %s regime]",
+                 row$rank, row$context_score, trig, row$cur_regime)
+
+  plot_xts_pair(
+    xts1         = xts_ret[, tk],
+    xts2         = baseline_xts,
+    label1       = tk,
+    label2       = BASELINE_LABEL,
+    regime_tbl   = rt,
+    title_prefix = pfx
+  )
+}
+```
+
+---
+
+## 7. Parameters used
+
+```{r params-table, echo=FALSE}
+tibble(
+  Parameter      = c("Baseline", "w_eq", "w_fi", "ir_floor", "fall_tolerance",
+                     "roll_win", "n_select", "rho_max"),
+  Value          = c(BASELINE_LABEL,
+                     params$w_eq, params$w_fi, params$ir_floor, params$fall_tolerance,
+                     params$roll_win, params$n_select, params$rho_max),
+  Description    = c(
+    "Phase 1.0 SAA baseline label",
+    "SPY weight in baseline",
+    "IEF weight in baseline",
+    "Min full-period IR vs baseline for Stage 1 admission",
+    "Max Fall excess loss vs baseline for Type A classification",
+    "Rolling window for IR and spread momentum (days)",
+    "Max tickers selected in Stage 3",
+    "Max pairwise ρ between selected tickers (1.0 = off)"
+  )
+) %>%
+  kbl() %>%
+  kable_styling(bootstrap_options = c("striped","condensed"), font_size = 12)
+```

@@ -21,7 +21,7 @@ mod_perf_table_server <- function(id, filtered, relative_mode, bmk, group_by_cla
     })
 
     output$table <- renderReactable({
-      df         <- filtered()
+      df         <- filtered() %>% arrange(display_rank)
       group_cols <- if (isTRUE(group_by_class())) "asset_class" else NULL
 
       col_defs_live <- col_defs

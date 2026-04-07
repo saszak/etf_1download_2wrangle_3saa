@@ -98,8 +98,10 @@ mod_absrel_server <- function(id, filtered, relative_mode, bmk) {
           bl      <- bmk_lbl
           plot_id <- paste0("plot_", i)
           output[[plot_id]] <- renderPlot({
+            tk_name <- perf_data$short_name[perf_data$symbol == tk][1] %||% ""
             tryCatch(
-              plot_rel_calendar_perf(tk, xts_ret_shiny, rx, bmk_label = bl),
+              plot_rel_calendar_perf(tk, xts_ret_shiny, rx, bmk_label = bl,
+                                     ticker_label = .tk_label(tk, tk_name)),
               error = function(e) {
                 ggplot() +
                   annotate("text", x = 0.5, y = 0.5,

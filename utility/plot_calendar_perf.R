@@ -145,7 +145,9 @@ plot_rel_calendar_perf <- function(ticker,
                                    xts_ret,
                                    xts_rel,
                                    highlight_year = as.integer(format(Sys.Date(), "%Y")),
-                                   bmk_label      = "SPY") {
+                                   bmk_label      = "SPY",
+                                   ticker_label   = NULL) {
+  ticker_label <- ticker_label %||% ticker
 
   build_df <- function(xts_col) {
     tibble(
@@ -245,8 +247,8 @@ plot_rel_calendar_perf <- function(ticker,
       labs(title = panel_title)
   }
 
-  p_abs <- make_panel(df_abs, paste0(ticker, "  —  Absolute Return"),                        show_y_axis = TRUE)
-  p_rel <- make_panel(df_rel, paste0(ticker, "  —  Return vs ", bmk_label, " (\u03b1)"),    show_y_axis = FALSE)
+  p_abs <- make_panel(df_abs, paste0(ticker_label, "  \u2014  Absolute Return"),                     show_y_axis = TRUE)
+  p_rel <- make_panel(df_rel, paste0(ticker_label, "  \u2014  Return vs ", bmk_label, " (\u03b1)"), show_y_axis = FALSE)
 
   p_legend <- plot_calendar_perf(xts_ret[, ticker], highlight_year = highlight_year) +
     theme(legend.position = "bottom") +

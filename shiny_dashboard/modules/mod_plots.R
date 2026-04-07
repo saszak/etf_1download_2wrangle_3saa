@@ -6,27 +6,34 @@
 
 mod_plots_ui <- function(id) {
   ns <- NS(id)
-  tagList(
-    div(
-      style = paste0(
-        "background:", DARK_HDR, "; color:", TEXT_DIM, ";",
-        " font-size:11px; padding:5px 12px; margin-bottom:4px;",
-        " display:flex; justify-content:space-between; align-items:center;"
-      ),
-      textOutput(ns("caption"), inline = TRUE),
-      span(style = paste0("color:", TEXT_DIM, "; font-size:10px;"),
-           "Blue = price (rebased 100)  \u2502  Amber dashed = 200DMA  \u2502  Red shading = trend OFF")
+  tabsetPanel(
+    type = "tabs",
+    tabPanel("200DMA",
+      tagList(
+        div(
+          style = paste0(
+            "background:", DARK_HDR, "; color:", TEXT_DIM, ";",
+            " font-size:11px; padding:5px 12px; margin-bottom:4px;",
+            " display:flex; justify-content:space-between; align-items:center;"
+          ),
+          textOutput(ns("caption"), inline = TRUE),
+          span(style = paste0("color:", TEXT_DIM, "; font-size:10px;"),
+               "Blue = price (rebased 100)  \u2502  Amber dashed = 200DMA  \u2502  Red shading = trend OFF")
+        ),
+        div(
+          style = paste0(
+            "overflow-y:auto; height:calc(100vh - 302px); background:", DARK_BG, ";"
+          ),
+          uiOutput(ns("panels_ui"))
+        )
+      )
     ),
-    div(
-      style = paste0(
-        "overflow-y:auto; height:calc(100vh - 302px); background:", DARK_BG, ";"
-      ),
-      uiOutput(ns("panels_ui"))
-    )
+    tabPanel("AbsRel",   mod_absrel_ui(ns("absrel"))),
+    tabPanel("Cal Year", mod_calyear_ui(ns("calyear")))
   )
 }
 
-mod_plots_server <- function(id, filtered) {
+mod_plots_server <- function(id, filtered, relative_mode = reactive(FALSE), bmk = reactive("SPY")) {
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
 
@@ -48,13 +55,17 @@ mod_plots_server <- function(id, filtered) {
     })
 
     output$panels <- renderPlot({
-      df      <- filtered()
+      df      <- filtered() %>% arrange(display_rank)
       symbols <- df$symbol
       if (length(symbols) == 0) return(NULL)
 
+      # Short-name lookup: ticker → curated short_name from perf_data
+      name_lut <- setNames(perf_data$short_name, perf_data$symbol)
+
       # Build per-ticker panels (filter from pre-computed trend_signals_shiny)
       plots <- purrr::map(symbols, function(tk) {
-        .ma200_single_panel(trend_signals_shiny, tk)
+        lbl <- name_lut[[tk]] %||% ""
+        .ma200_single_panel(trend_signals_shiny, tk, label = lbl)
       }) %>% purrr::compact()
 
       if (length(plots) == 0) return(NULL)
@@ -77,5 +88,8 @@ mod_plots_server <- function(id, filtered) {
           )
         )
     }, bg = "white")
+
+    mod_absrel_server("absrel",   filtered, relative_mode, bmk)
+    mod_calyear_server("calyear", filtered, relative_mode, bmk)
   })
 }

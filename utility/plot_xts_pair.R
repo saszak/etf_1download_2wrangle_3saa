@@ -43,7 +43,13 @@ plot_xts_pair <- function(
     roll_ir_win  = 250,     # rolling IR window in days
     regime_tbl   = NULL,   # optional: regime table from build_regime_table()
                            #   if supplied, adds regime shading to Panel 5 + Panel 6
-    title_prefix = NULL
+    title_prefix = NULL,
+    name1        = NULL,   # optional short name for label1, shown in Panel 1 title only
+                           # e.g. name1 = "Commodity Index" → "PDBC (Commodity Index) vs ..."
+    role         = NULL,   # "Enhancer" | "Stabilizer" | NULL — shown in header box line 1
+    extended     = FALSE,  # FALSE = 6 panels (Wealth, L/S Spread, Rolling L/S, DD, 250d Return, IR)
+                           # TRUE  = 9 panels (incl. Rolling ρ, Regime ρ, Distribution)
+    print_plot   = TRUE    # set FALSE to suppress auto-print (caller handles display)
 ) {
 
   # ── Input validation ─────────────────────────────────────────────────────────
@@ -118,11 +124,13 @@ plot_xts_pair <- function(
       plot.title        = element_text(face = "bold", size = 12),
       plot.subtitle     = element_text(colour = "grey50", size = 8),
       axis.title.x      = element_blank(),
+      axis.text         = element_text(colour = "#1B3A6B"),
+      axis.text.y       = element_text(colour = "#1B3A6B", face = "bold"),
       legend.position   = "bottom",
       legend.key.height = unit(0.4, "cm")
     )
 
-  pfx <- if (!is.null(title_prefix)) paste0(title_prefix, " — ") else ""
+  pfx <- if (!is.null(title_prefix)) title_prefix else NULL   # used only in plot_annotation
 
   # ── Panel 1: cumulative wealth of both series ─────────────────────────────────
   p1 <- ggplot(wealth_df, aes(x = date, y = wealth, colour = series)) +
@@ -134,7 +142,7 @@ plot_xts_pair <- function(
     scale_y_continuous(labels = number_format(accuracy = 0.01)) +
     scale_x_date(expand = expansion(mult = 0.01)) +
     labs(
-      title    = paste0(pfx, "Cumulative Wealth: ", label1, " vs ", label2),
+      title    = sprintf("1. Cumulative Wealth: %s vs %s", label1, label2),
       subtitle = "Base = 1.0 at first common date"
     ) +
     base_theme
@@ -161,12 +169,12 @@ plot_xts_pair <- function(
     scale_y_continuous(labels = number_format(accuracy = 0.01)) +
     scale_x_date(expand = expansion(mult = 0.01)) +
     labs(
-      title    = paste0(pfx, "Spread Wealth: Long ", label1, " / Short ", label2),
+      title    = sprintf("2. L/S Spread Wealth: Long %s / Short %s", label1, label2),
       subtitle = "Orange = positive spread  |  Red = negative spread  |  Base = 1.0"
     ) +
     base_theme
 
-  # ── Panel 3: drawdown ─────────────────────────────────────────────────────────
+  # ── Panel 4: drawdown ─────────────────────────────────────────────────────────
   dd_colours <- setNames(
     c(col1, col2, col_spread),
     c(label1, label2, "Spread (L/S)")
@@ -203,7 +211,7 @@ plot_xts_pair <- function(
                        limits = c(min(c(dd1, dd2, dd_spr), na.rm = TRUE) * 1.05, 0.02)) +
     scale_x_date(expand = expansion(mult = 0.01)) +
     labs(
-      title    = paste0(pfx, "Running Drawdown from Peak"),
+      title    = sprintf("4. Running Drawdown from Peak: %s vs %s", label1, label2),
       subtitle = mdd_label
     ) +
     base_theme
@@ -280,7 +288,7 @@ plot_xts_pair <- function(
     scale_fill_manual(values = box_colours, guide = "none") +
     scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
     labs(
-      title    = paste0(pfx, "Daily Return Distributions"),
+      title    = sprintf("9. Return Distribution: %s vs %s", label1, label2),
       subtitle = "Box = IQR  |  Line = median  |  Whiskers = 1.5×IQR  |  Dots = outliers"
     ) +
     base_theme +
@@ -320,9 +328,13 @@ plot_xts_pair <- function(
          subtitle = "\u00b12.5\u00d7IQR view  |  outliers exist beyond frame") +
     base_theme + theme(axis.title.y = element_blank())
 
-  # p4c: horizontal ridgeline density
-  if (!requireNamespace("ggridges", quietly = TRUE))
-    install.packages("ggridges", repos = "https://cloud.r-project.org")
+  # p4c: horizontal ridgeline density (skip gracefully if ggridges not installed)
+  if (!requireNamespace("ggridges", quietly = TRUE)) {
+    p4c <- ggplot() +
+      annotate("text", x = .5, y = .5, label = "install ggridges for ridgeline panel",
+               colour = "grey60", size = 3.5) +
+      theme_void()
+  } else {
 
   p4c <- ggplot(box_df, aes(x = ret, y = series, fill = series)) +
     geom_vline(xintercept = 0, colour = "grey40", linewidth = 0.4) +
@@ -338,6 +350,8 @@ plot_xts_pair <- function(
          subtitle = "White lines = Q1 / median / Q3") +
     base_theme + theme(axis.title.y = element_blank(),
                        axis.title.x = element_blank())
+
+  } # end ggridges else
 
   p_dist_troika <- (p4a | p4b | p4c) +
     plot_annotation(
@@ -380,7 +394,43 @@ plot_xts_pair <- function(
       summarise(mean_cor = mean(roll_cor, na.rm = TRUE), .groups = "drop")
   }
 
-  # ── Panel 5: rolling correlation + optional regime shading ───────────────────
+  # ── Panel 3: rolling L/S return (spread only) — built here so has_regime is available ──
+  roll_ret_spr_only <- as.numeric(rollapply(r_spread, roll_ir_win,
+                                             function(x) prod(1 + x) - 1,
+                                             align = "right", fill = NA))
+  ls_roll_df  <- tibble(date = dates, ret = roll_ret_spr_only) %>% filter(!is.na(ret))
+  ls_roll_pos <- ls_roll_df[ls_roll_df$ret >= 0, ]
+  ls_roll_neg <- ls_roll_df[ls_roll_df$ret <  0, ]
+
+  p_ls_roll <- ggplot(ls_roll_df, aes(x = date, y = ret))
+
+  if (has_regime) {
+    p_ls_roll <- p_ls_roll +
+      geom_rect(data = shade_fall,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                fill = "#D90429", alpha = 0.10, inherit.aes = FALSE) +
+      geom_rect(data = shade_rec,
+                aes(xmin = xmin, xmax = xmax, ymin = -Inf, ymax = Inf),
+                fill = "#F77F00", alpha = 0.08, inherit.aes = FALSE)
+  }
+
+  p_ls_roll <- p_ls_roll +
+    geom_hline(yintercept = 0, colour = "grey40", linewidth = 0.5) +
+    geom_ribbon(data = ls_roll_pos, aes(ymin = 0,   ymax = ret),
+                fill = col_spread, alpha = 0.30) +
+    geom_ribbon(data = ls_roll_neg, aes(ymin = ret, ymax = 0),
+                fill = col2, alpha = 0.22) +
+    geom_line(colour = col_spread, linewidth = 0.8) +
+    scale_y_continuous(labels = percent_format(accuracy = 1)) +
+    scale_x_date(expand = expansion(mult = 0.01)) +
+    labs(
+      title    = sprintf("3. %d-Day Rolling L/S Return: Long %s / Short %s",
+                         roll_ir_win, label1, label2),
+      subtitle = "Orange = L/S positive over window  |  Red = L/S negative  |  Regime shading from SPY"
+    ) +
+    base_theme
+
+  # ── Panel 7: rolling correlation + optional regime shading ───────────────────
   p5 <- ggplot(cor_df[!is.na(cor_df$roll_cor), ], aes(x = date, y = roll_cor)) +
 
     geom_hline(yintercept = c(-0.5, 0, 0.5),
@@ -423,8 +473,8 @@ plot_xts_pair <- function(
                        labels = number_format(accuracy = 0.1)) +
     scale_x_date(expand = expansion(mult = 0.01)) +
     labs(
-      title    = paste0(pfx, sprintf("%d-Day Rolling Correlation: %s vs %s",
-                                     roll_cor_win, label1, label2)),
+      title    = sprintf("7. %d-Day Rolling Correlation: %s vs %s",
+                         roll_cor_win, label1, label2),
       subtitle = if (has_regime)
         "Red shading = SPY Fall  |  Orange = Recovery  |  Blue/Red ribbon = ρ sign  |  Orange line = full-period ρ"
       else
@@ -456,8 +506,8 @@ plot_xts_pair <- function(
       scale_y_continuous(limits = c(-1, 1), breaks = seq(-1, 1, 0.25),
                          labels = number_format(accuracy = 0.1)) +
       labs(
-        title    = paste0(pfx, "Regime-Conditional Correlation: ",
-                          label1, " vs ", label2),
+        title    = sprintf("8. Regime-Conditional Correlation: %s vs %s",
+                           label1, label2),
         subtitle = paste0(
           "Does ρ shift across SPY regimes?  ",
           "ρ↓ in Fall = genuine hedge  |  ρ↑ in Fall = correlated selloff"
@@ -537,8 +587,8 @@ plot_xts_pair <- function(
 
     scale_x_date(expand = expansion(mult = 0.01)) +
     labs(
-      title    = paste0(pfx, sprintf("%d-Day Rolling IR: Long %s / Short %s",
-                                     roll_ir_win, label1, label2)),
+      title    = sprintf("6. %d-Day Rolling IR: Long %s / Short %s",
+                         roll_ir_win, label1, label2),
       subtitle = paste0(
         "IR = annualised E[spread] / σ[spread]  |  ",
         "Green = IR > 0 (spread earns)  |  Red = IR < 0  |  ",
@@ -605,33 +655,72 @@ plot_xts_pair <- function(
     scale_y_continuous(labels = percent_format(accuracy = 1)) +
     scale_x_date(expand = expansion(mult = 0.01)) +
     labs(
-      title    = paste0(pfx, sprintf("%d-Day Rolling Return: %s  |  %s  |  Spread",
-                                     roll_ir_win, label1, label2)),
+      title    = sprintf("5. %d-Day Rolling Return: %s vs %s",
+                         roll_ir_win, label1, label2),
       subtitle = "Cumulative return over trailing 250 trading days  |  Above 0 = positive period return"
     ) +
     base_theme
 
   # ── Combined plot ─────────────────────────────────────────────────────────────
-  stack <- if (has_regime) (p1 / p2 / p3 / p8 / p4 / p5 / p6 / p7)
-           else             (p1 / p2 / p3 / p8 / p4 / p5 / p7)
+  # Panel order: 1.Wealth | 2.L/S Spread | 3.Rolling L/S | 4.DD | 5.250d Return | 6.IR
+  #              [extended only] 7.Rolling ρ | 8.Regime ρ | 9.Distribution
+  stack <- if (isTRUE(extended)) {
+    if (has_regime) (p1 / p2 / p_ls_roll / p3 / p8 / p7 / p5 / p6 / p4)
+    else            (p1 / p2 / p_ls_roll / p3 / p8 / p7 / p5 / p4)
+  } else {
+    (p1 / p2 / p_ls_roll / p3 / p8 / p7)
+  }
 
-  sub <- if (has_regime)
-    "P1: wealth  |  P2: L/S spread  |  P3: DD  |  P8: 250d return  |  P4: dist  |  P5: rolling ρ  |  P6: regime ρ  |  P7: rolling IR"
+  label1_full <- if (!is.null(name1)) sprintf("%s (%s)", label1, name1) else label1
+
+  # ── Two-line title with role badge ────────────────────────────────────────────
+  # Line 1: role badge  +  title_prefix  (context / score / regime info)
+  # Line 2: ticker pair  (always the anchor line)
+  role_tag   <- if (!is.null(role))
+    toupper(sprintf("── %s FINGERPRINT ──", role))
   else
-    "P1: wealth  |  P2: L/S spread  |  P3: DD  |  P8: 250d return  |  P4: dist  |  P5: rolling ρ  |  P7: rolling IR"
+    "── TICKER FINGERPRINT ──"
+
+  header_line <- if (!is.null(pfx))
+    sprintf("%s   %s", role_tag, pfx)
+  else
+    role_tag
+
+  pair_line  <- sprintf("%s  vs  %s", label1_full, label2)
+  ann_title  <- sprintf("%s\n%s", header_line, pair_line)
+
+  # Colours: Enhancer = blue family, Stabilizer = teal, generic = navy
+  box_fill <- switch(
+    tolower(role %||% ""),
+    "enhancer"   = "#eff6ff",   # light blue
+    "stabilizer" = "#f0fdf4",   # light green
+                   "#f8fafc"    # off-white default
+  )
+  box_border <- switch(
+    tolower(role %||% ""),
+    "enhancer"   = "#1d4ed8",
+    "stabilizer" = "#15803d",
+                   "#1d3461"
+  )
 
   combined <- stack +
     plot_annotation(
-      title    = paste0(pfx, label1, " vs ", label2, " — Pair Analysis"),
-      subtitle = sub,
+      title    = ann_title,
+      subtitle = if (isTRUE(extended))
+        "1: Wealth  |  2: L/S Spread  |  3: Rolling L/S  |  4: DD  |  5: 250d Return  |  6: IR  |  7: Rolling ρ  |  8: Regime ρ  |  9: Distribution"
+      else
+        "1: Wealth  |  2: L/S Spread  |  3: Rolling L/S  |  4: DD  |  5: 250d Return  |  6: IR",
       theme = theme(
-        plot.title    = element_text(face = "bold", size = 14),
-        plot.subtitle = element_text(colour = "grey50", size = 9)
+        plot.background = element_rect(fill = box_fill, colour = box_border, linewidth = 1.2),
+        plot.margin     = margin(10, 10, 6, 10),
+        plot.title      = element_text(face = "bold", size = 13, colour = box_border,
+                                       lineheight = 1.4, margin = margin(b = 4)),
+        plot.subtitle   = element_text(colour = "grey50", size = 9)
       )
     )
 
-  print(combined)
-  invisible(list(p_both = p1, p_spread = p2, p_dd = p3, p_roll_ret = p8,
+  if (isTRUE(print_plot)) print(combined)
+  invisible(list(p_both = p1, p_spread = p2, p_ls_roll = p_ls_roll, p_dd = p3, p_roll_ret = p8,
                  p_box = p4, p_dist_troika = p_dist_troika,
                  p_cor = p5, p_regime_cor = p6, p_ir = p7,
                  combined = combined,

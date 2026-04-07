@@ -1,0 +1,827 @@
+---
+title: "Market State Framework"
+subtitle: "Documentation & Analysis — 3-Layer Regime Allocation Engine"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    fig_caption: true
+params:
+  min_persist: 5      # days new state must hold before confirmation
+  t_fall:      0.10   # SPY/URTH fall threshold
+  roll_win:    60     # rolling window for premium/appetite spreads (days)
+  ma_win:      200    # moving-average window for sector breadth
+  mom_win:     63     # sector rotation momentum window (days)
+---
+
+```{css, echo=FALSE}
+/* ── Layout ─────────────────────────────────────────────────────────────── */
+.state-badge {
+  display: inline-block;
+  padding: 6px 16px;
+  border-radius: 4px;
+  font-weight: bold;
+  font-size: 1.05em;
+  color: white;
+  margin: 2px 4px;
+}
+.signal-box {
+  background: #F0F4FA;
+  border-left: 4px solid #1B2A4A;
+  padding: 10px 16px;
+  margin: 10px 0;
+  font-size: 0.9em;
+}
+.doc-note {
+  background: #fffbeb;
+  border-left: 4px solid #d97706;
+  padding: 8px 14px;
+  margin: 10px 0;
+  font-size: 0.88em;
+  color: #444;
+}
+.finding-box {
+  background: #f0fdf4;
+  border-left: 4px solid #16a34a;
+  padding: 10px 16px;
+  margin: 12px 0;
+  font-size: 0.9em;
+}
+.caption {
+  color: #555;
+  font-size: 0.82em;
+  font-style: italic;
+  border-left: 3px solid #1B3A6B;
+  padding-left: 6px;
+  margin-top: 4px;
+}
+.section-div { border-top: 2px solid #dee2e6; margin: 48px 0 24px 0; }
+table { font-size: 0.88em; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 6
+)
+
+library(tidyverse)
+library(xts)
+library(zoo)
+library(patchwork)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(lubridate)
+library(here)
+
+select <- dplyr::select
+
+if (!exists("params"))
+  params <- list(min_persist = 5L, t_fall = 0.10,
+                 roll_win = 60, ma_win = 200, mom_win = 63)
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+if (!exists("xts_ret"))
+  xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+if (!exists("label_daily_regime"))
+  source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+
+if (!exists("g_sector_tickers"))
+  source(here("scripts/00_init_universe.R"))
+
+source(here("scripts_market_state/ms_vector_state.R"))
+source(here("scripts_market_state/ms_sector_pattern.R"))
+source(here("scripts_market_state/ms_risk_allocation.R"))
+source(here("scripts_market_state/ms_visuals.R"))
+
+# ── Build histories ───────────────────────────────────────────────────────────
+ms_hist <- build_market_state_history(
+  xts_ret,
+  roll_win    = params$roll_win,
+  ma_win      = params$ma_win,
+  t_fall      = params$t_fall,
+  min_persist = params$min_persist
+)
+
+sp_hist <- build_sector_pattern_history(
+  xts_ret,
+  mom_win = params$mom_win
+)
+
+ra_hist <- build_risk_allocation_history(
+  xts_ret,
+  roll_win    = params$roll_win,
+  ma_win      = params$ma_win,
+  t_fall      = params$t_fall,
+  mom_win     = params$mom_win,
+  min_persist = params$min_persist
+)
+
+# ── Current snapshot ─────────────────────────────────────────────────────────
+cur_ms <- ms_hist %>% filter(!is.na(market_state)) %>% tail(1)
+cur_sp <- sp_hist %>% filter(!is.na(sector_pattern)) %>% tail(1)
+cur_ra <- ra_hist %>% filter(!is.na(final_eq_weight)) %>% tail(1)
+
+n_years <- as.numeric(diff(range(ms_hist$date))) / 365.25
+```
+
+---
+
+# The Idea in Plain English
+
+Think of this framework like **reading the weather before deciding what to wear**.
+
+The basic question is simple: *how much of your portfolio should be in stocks vs bonds right now?*
+We answer it in three steps.
+
+---
+
+**Layer 1 — "What's the weather globally?"**
+
+We check 5 signals, like a weather station:
+
+- Is the **world stock market** (URTH) falling or recovering?
+- Is the **US market** (SPY) falling or recovering?
+- Is the **US outperforming** the rest of the world over the last 60 days?
+- Is **Emerging Markets** (riskier countries) keeping up with the US? If yes, investors are feeling brave globally.
+- How many of the 10 US sectors are **above their 200-day average price**? If most are, the rally is broad and healthy. If only a few, it's fragile.
+
+These 5 answers collapse into **one of 5 named states** — from best to worst:
+**Expansion → US-Led → Late-Cycle → Deterioration → Contraction.**
+Each state comes with a suggested equity weight (35% to 65%).
+
+> **The persistence filter:** We don't react to a single bad day. The state has to hold for
+> **`r params$min_persist` days in a row** before we believe it. Without this, the raw signal
+> fires ~24 times per year — mostly noise. With it, we get ~7 real transitions per year
+> (roughly quarterly).
+
+---
+
+**Layer 2 — "Which sectors are leading?"**
+
+Inside the market, are **risky sectors** (tech, consumer, energy, industrials, materials)
+outperforming **safe sectors** (utilities, staples, healthcare)?
+
+- Risky sectors winning → investors are confident → nudge equity **up** 2–5%
+- Safe sectors winning → investors are hiding → nudge equity **down** 2–5%
+
+---
+
+**Layer 3 — "Final answer"**
+
+Layer 1 base weight + Layer 2 nudge = **final equity %**, clipped between 25% and 75%
+so we never go to extremes.
+
+---
+
+**What this report shows:**
+
+| Section | What you'll find |
+|---|---|
+| Current State Snapshot | Today's reading — state, signals, allocation vs passive 60/40 |
+| Framework Architecture | How each signal is built and why |
+| Historical Analysis | How the state has evolved since `r params$from_yr` |
+| Persistence Analysis | How much noise the filter removes, and at what cost in lag |
+| Transition Analysis | How often states change month-to-month, and by how much |
+| Calibration Notes | Every threshold documented with its rationale and known limitations |
+
+---
+
+# Current State Snapshot {.tabset}
+
+> As of **`r format(cur_ra$date, "%d %B %Y")`** &nbsp;|&nbsp;
+> Persistence filter: **`r params$min_persist` days** &nbsp;|&nbsp;
+> T_fall: **`r scales::percent(params$t_fall)`**
+
+```{r snapshot-badges, results='asis'}
+state_colours <- c(
+  Expansion       = "#16a34a",
+  `US-Led`        = "#2563eb",
+  `Late-Cycle`    = "#d97706",
+  Deterioration   = "#ea580c",
+  Contraction     = "#dc2626"
+)
+pattern_colours <- c(
+  `Strong Risk-On`  = "#15803d",
+  `Risk-On`         = "#4ade80",
+  `Neutral`         = "#64748b",
+  `Risk-Off`        = "#fb923c",
+  `Strong Risk-Off` = "#dc2626"
+)
+
+ms_col <- state_colours[as.character(cur_ms$market_state)]
+sp_col <- pattern_colours[as.character(cur_sp$sector_pattern)]
+
+cat(sprintf(
+  "<div style='margin:18px 0 10px 0;'>
+  <span style='font-size:0.9em;color:#555;'>L1 Market State</span><br>
+  <span class='state-badge' style='background:%s;font-size:1.3em;'>%s</span>
+  &nbsp;&nbsp;
+  <span style='font-size:0.9em;color:#555;'>L2 Sector Pattern</span><br>
+  <span class='state-badge' style='background:%s;font-size:1.3em;'>%s</span>
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <span style='font-size:0.9em;color:#555;'>Final EQ weight</span><br>
+  <span style='font-size:2.2em;font-weight:bold;color:#1B2A4A;'>%.0f%%</span>
+  &nbsp;
+  <span style='font-size:1.1em;color:#888;'>/ %.0f%% FI</span>
+  </div>",
+  ms_col, as.character(cur_ms$market_state),
+  sp_col, as.character(cur_sp$sector_pattern),
+  cur_ra$final_eq_weight * 100,
+  cur_ra$fi_weight * 100
+))
+```
+
+## Signal readings
+
+```{r snapshot-table}
+snap <- tibble(
+  Signal = c(
+    "URTH regime", "SPY regime",
+    "US premium (60d)", "EM appetite (60d)",
+    "Sector breadth (200DMA)",
+    "Cyclical momentum (63d)", "Defensive momentum (63d)",
+    "Rotation score"
+  ),
+  Value = c(
+    cur_ms$urth_regime, cur_ms$spy_regime,
+    paste0(sprintf("%+.1f", cur_ms$us_premium_60d), "%  (",
+           if (cur_ms$us_premium > 0) "US leading" else "US lagging", ")"),
+    paste0(sprintf("%+.1f", cur_ms$em_appetite_60d), "%  (",
+           if (cur_ms$em_appetite > 0) "EM leading \u2191" else "EM lagging \u2193", ")"),
+    paste0(round(cur_ms$sector_breadth * 100), "% above 200DMA"),
+    paste0(sprintf("%+.1f", cur_sp$cyclical_mom), "%"),
+    paste0(sprintf("%+.1f", cur_sp$defensive_mom), "%"),
+    paste0(sprintf("%+.2f", cur_sp$rotation_score), "%  (",
+           as.character(cur_sp$sector_pattern), ")")
+  ),
+  Layer = c("L1","L1","L1","L1","L1","L2","L2","L2")
+)
+
+kable(snap, caption = paste0("Signal readings — ", format(cur_ra$date))) %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "left", font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A") %>%
+  column_spec(3, color = "#888888")
+```
+
+## Allocation
+
+```{r snapshot-alloc-table}
+alloc <- tibble(
+  ` ` = c("L1 base (market state)", "L2 adjustment (sector pattern)",
+          "Final equity weight", "Final fixed income weight"),
+  Weight = c(
+    paste0(round(cur_ra$base_eq_weight * 100), "%"),
+    paste0(sprintf("%+.0f", (cur_ra$adj_eq_weight - cur_ra$base_eq_weight) * 100), "%"),
+    paste0("<strong>", round(cur_ra$final_eq_weight * 100), "%</strong>"),
+    paste0("<strong>", round(cur_ra$fi_weight * 100), "%</strong>")
+  ),
+  vs_passive = c(
+    paste0(sprintf("%+.0f", (cur_ra$base_eq_weight - 0.60) * 100), "pp vs 60/40"),
+    "—",
+    paste0(sprintf("%+.0f", (cur_ra$final_eq_weight - 0.60) * 100), "pp vs 60/40"),
+    paste0(sprintf("%+.0f", (cur_ra$fi_weight - 0.40) * 100), "pp vs 60/40")
+  )
+)
+
+kable(alloc, escape = FALSE,
+      col.names = c("Component", "Weight", "vs Passive 60/40"),
+      caption = "Allocation decomposition") %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "left", font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  row_spec(3:4, bold = TRUE, background = "#F0F4FA") %>%
+  column_spec(1, color = "#1B2A4A")
+```
+
+---
+
+# Framework Architecture {.tabset}
+
+<div class="doc-note">
+This section documents the design decisions and signal definitions. It is intended as a
+reference for future review and calibration.
+</div>
+
+## Overview
+
+The framework produces a **daily equity/fixed-income allocation** from three independent layers:
+
+```
+URTH ──┐
+SPY  ──┤  L1: Market State Vector   →  5 named states   →  base EQ weight (35–65%)
+VWO  ──┤       (5 signals)
+Sectors┘
+
+Sectors ──  L2: Sector Rotation     →  5 pattern labels →  ±adjustment (−5% to +5%)
+            (cyclical vs defensive momentum)
+
+L1 + L2  →  L3: Risk Allocation    →  final EQ/FI weight  (clipped 25–75%)
+```
+
+**Design principles:**
+
+1. **Hierarchy before breadth** — global (URTH) anchors the view; US (SPY) refines it; sectors confirm it.
+2. **Confirmation before action** — `min_persist = `r params$min_persist`` days required before a state change is acted on (eliminates `r round((1 - 59/191)*100)`% of raw transitions).
+3. **Additive, not multiplicative** — L2 adds ±pp on top of L1 base weight; the final weight is bounded [25%, 75%].
+4. **Observable signals only** — all inputs are price-based, computable daily from public ETF data.
+
+## L1 — Market State Vector
+
+The five signals and their construction:
+
+```{r l1-signal-table}
+sig_tbl <- tibble(
+  `#` = 1:5,
+  Signal = c("URTH regime", "SPY regime", "US premium", "EM appetite", "Sector breadth"),
+  Construction = c(
+    "label_daily_regime(URTH, t_fall=10%) → Fall / Recovery / Consolidation",
+    "label_daily_regime(SPY,  t_fall=10%) → Fall / Recovery / Consolidation",
+    paste0("sign(rolling ", params$roll_win, "d cumret SPY − URTH)  → +1 (US leading) / −1 (US lagging)"),
+    paste0("sign(rolling ", params$roll_win, "d cumret VWO − SPY)   → +1 (EM leading) / −1 (EM lagging)"),
+    paste0("% of 10 GICS sector ETFs with price ≥ ", params$ma_win, "-day MA  → 0–1")
+  ),
+  `Why it matters` = c(
+    "Global regime anchor — URTH falling means DM-wide risk-off, not just a US event",
+    "US-specific regime — ~65% of URTH; divergence from URTH = regional decoupling",
+    "Measures US exceptionalism premium; negative = broadening / non-US leadership",
+    "EM outperformance = global risk appetite is open; EM lags in genuine risk-off",
+    "Breadth is a participation measure: narrow rallies (few sectors) are fragile"
+  )
+)
+
+kable(sig_tbl, caption = "Layer 1 signal definitions") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 11) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, width = "2em") %>%
+  column_spec(2, bold = TRUE, color = "#1B2A4A", width = "12em") %>%
+  column_spec(3, monospace = TRUE, width = "28em")
+```
+
+## L1 — State Classification
+
+States are checked in **priority order** — most severe checked first:
+
+```{r state-class-table}
+state_tbl <- tibble(
+  Priority = 1:5,
+  State = c("Contraction", "Deterioration", "Late-Cycle", "US-Led", "Expansion"),
+  Condition = c(
+    "URTH = Fall AND SPY = Fall AND EM appetite < 0 AND breadth < 40%",
+    "(URTH = Fall OR SPY = Fall) AND breadth < 55%",
+    "breadth < 55%  OR  (breadth < 70% AND EM appetite < 0)",
+    "US premium > 0 AND EM appetite ≤ 0",
+    "(all else — broad participation, EM not lagging)"
+  ),
+  `EQ weight` = c("35%", "42%", "50%", "58%", "65%"),
+  Interpretation = c(
+    "Synchronised global sell-off with defensive rotation",
+    "At least one major index in drawdown; breadth narrow",
+    "Breadth fading; sector rotation toward defensives",
+    "US driving — international drag reduces risk appetite",
+    "Broad participation; EM affirms global risk appetite"
+  )
+)
+
+state_colours_tbl <- c("#dc2626","#ea580c","#d97706","#2563eb","#16a34a")
+
+kable(state_tbl, caption = "State classification logic (priority order, top to bottom)") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 11) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(2, bold = TRUE,
+              color = "white",
+              background = state_colours_tbl) %>%
+  column_spec(4, bold = TRUE)
+```
+
+## L2 — Sector Rotation
+
+```{r l2-table}
+l2_tbl <- tibble(
+  Group = c("Cyclicals", "Defensives", "Excluded"),
+  Tickers = c(
+    paste(intersect(SP_CYCLICALS,  colnames(xts_ret)), collapse = ", "),
+    paste(intersect(SP_DEFENSIVES, colnames(xts_ret)), collapse = ", "),
+    "XLF (ambiguous rate sensitivity), XLRE (rate sensitive)"
+  ),
+  `Momentum window` = c(
+    paste0(params$mom_win, "d cumret"),
+    paste0(params$mom_win, "d cumret"),
+    "—"
+  ),
+  `Role` = c(
+    "Growth/risk: outperform in expansion, underperform in stress",
+    "Income/safety: outperform when markets derisking",
+    "Omitted to keep signal clean"
+  )
+)
+
+kable(l2_tbl, caption = "Layer 2 sector groupings") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 11) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A")
+```
+
+**Rotation score** = mean(cyclical 63d mom) − mean(defensive 63d mom)
+
+Pattern labels and EQ adjustments:
+
+```{r pattern-adj-table}
+pat_tbl <- tibble(
+  Pattern = c("Strong Risk-On", "Risk-On", "Neutral", "Risk-Off", "Strong Risk-Off"),
+  Threshold = c("> +4%", "+1% to +4%", "−1% to +1%", "−4% to −1%", "< −4%"),
+  `EQ adj` = c("+5pp", "+2pp", "0pp", "−2pp", "−5pp"),
+  Colour = c("#15803d","#4ade80","#64748b","#fb923c","#dc2626")
+)
+
+kable(pat_tbl %>% select(-Colour),
+      caption = "Layer 2 pattern labels and equity weight adjustments") %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "left", font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE,
+              color = "white",
+              background = pat_tbl$Colour) %>%
+  column_spec(3, bold = TRUE)
+```
+
+---
+
+# Historical Analysis {.tabset}
+
+## State timeline
+
+```{r timeline, fig.height=4.5}
+plot_ms_timeline(ms_hist)
+```
+
+<p class="caption">White line = confirmed equity weight (y-axis right). Colour = confirmed market state after `r params$min_persist`-day persistence filter. Raw (unfiltered) state also computed but not shown.</p>
+
+## Signal strips
+
+```{r strips, fig.height=3.5}
+plot_ms_signal_strip(ms_hist)
+```
+
+<p class="caption">Each row is one of the 5 L1 signals, mapped to a −1 → +1 scale. Red = risk-off / Fall. Green = risk-on / Expansion. Regime signals (URTH, SPY) encoded as Fall=−1, Recovery=+0.5, Consolidation=+1.</p>
+
+## Allocation history
+
+```{r alloc-chart, fig.height=5}
+plot_ms_allocation(ra_hist)
+```
+
+<p class="caption">Stacked area = final EQ (blue) / FI (grey) weights after L1+L2 combination. Red/orange shading = Contraction / Deterioration periods. Dashed lines = passive 60/40 reference.</p>
+
+---
+
+# Persistence Analysis {.tabset}
+
+<div class="doc-note">
+The raw daily signal generates ~24 transitions/year — nearly 2 per month.
+Most are 1–4 day noise runs. The persistence filter eliminates these before
+they reach the allocation decision.
+</div>
+
+## Filter comparison
+
+```{r persist-compare}
+thresholds <- c(1, 3, 5, 10, 15, 21)
+
+persist_tbl <- map_dfr(thresholds, function(p) {
+  h <- build_market_state_history(
+    xts_ret,
+    roll_win = params$roll_win, ma_win = params$ma_win,
+    t_fall = params$t_fall, min_persist = p
+  ) %>% filter(!is.na(market_state))
+
+  n_yr  <- as.numeric(diff(range(h$date))) / 365.25
+  trans <- sum(h$market_state != lag(h$market_state), na.rm = TRUE)
+  raw_t <- sum(h$market_state_raw != lag(h$market_state_raw), na.rm = TRUE)
+  lag_p <- mean(as.character(h$market_state) != as.character(h$market_state_raw), na.rm = TRUE)
+
+  tibble(
+    `min_persist (days)` = p,
+    `Transitions/yr`     = round(trans / n_yr, 1),
+    `Noise filtered`     = paste0(round((1 - trans / raw_t) * 100), "%"),
+    `Days lagged`        = paste0(round(lag_p * 100), "%"),
+    `Approx cadence`     = case_when(
+      trans / n_yr > 15 ~ "Weekly",
+      trans / n_yr > 6  ~ "Monthly",
+      trans / n_yr > 2  ~ "Quarterly",
+      TRUE              ~ "Semi-annual"
+    )
+  )
+})
+
+kable(persist_tbl,
+      caption = paste0("Effect of persistence filter on confirmed transitions  (full history: ",
+                       round(n_years, 1), " years)")) %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "left", font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  row_spec(which(thresholds == params$min_persist),
+           bold = TRUE, background = "#F0F4FA") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A") %>%
+  footnote(general = paste0("Highlighted row = current setting (min_persist = ", params$min_persist, ")"),
+           general_title = "")
+```
+
+<div class="finding-box">
+**Sweet spot: 5-day filter** eliminates ~69% of raw noise, leaves ~7 real transitions/year (quarterly cadence),
+and lags confirmation by only ~18% of days — still fast enough to catch swift deteriorations (e.g. COVID-style drops
+typically persist &gt;5 days before reversing).
+</div>
+
+## Run length distribution
+
+```{r run-length, fig.height=4.5}
+runs <- rle(as.character(ms_hist$market_state[!is.na(ms_hist$market_state)]))
+run_df <- tibble(state = runs$values, days = runs$lengths) %>%
+  mutate(state = factor(state, levels = MS_STATE_LEVELS))
+
+ggplot(run_df, aes(x = days, fill = state)) +
+  geom_histogram(bins = 40, colour = "white", linewidth = 0.15) +
+  scale_fill_manual(values = MS_STATE_PAL, name = NULL) +
+  scale_x_continuous(breaks = c(1, 5, 10, 21, 63, 126),
+                     labels = c("1d","5d","10d","21d","63d","126d")) +
+  geom_vline(xintercept = params$min_persist,
+             linetype = "dashed", colour = "#1B2A4A", linewidth = 0.8) +
+  annotate("text", x = params$min_persist + 1, y = Inf, vjust = 1.4, hjust = 0,
+           label = paste0("persist=", params$min_persist), size = 3.2, colour = "#1B2A4A") +
+  facet_wrap(~ state, ncol = 5, scales = "free_y") +
+  labs(title = paste0("State run lengths — min_persist = ", params$min_persist),
+       subtitle = "Each bar = one run of consecutive days in that confirmed state",
+       x = "Run length (days)", y = "Count") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none",
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold"))
+```
+
+## State distribution
+
+```{r state-dist}
+valid_ms <- ms_hist %>% filter(!is.na(market_state))
+
+dist_tbl <- valid_ms %>%
+  count(market_state) %>%
+  mutate(
+    pct     = n / sum(n),
+    avg_dur = map_dbl(market_state, function(s) {
+      r <- rle(as.character(valid_ms$market_state))
+      mean(r$lengths[r$values == as.character(s)])
+    })
+  ) %>%
+  transmute(
+    State          = as.character(market_state),
+    Periods        = map_int(market_state, function(s) {
+      r <- rle(as.character(valid_ms$market_state))
+      sum(r$values == as.character(s))
+    }),
+    `Trading days` = n,
+    `% of history` = scales::percent(pct, accuracy = 0.1),
+    `Avg run (days)` = round(avg_dur, 1)
+  )
+
+kable(dist_tbl, caption = paste0("State distribution — confirmed (min_persist = ",
+                                  params$min_persist, ")")) %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "left", font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "white",
+              background = MS_STATE_PAL[dist_tbl$State])
+```
+
+---
+
+# Transition Analysis {.tabset}
+
+## Monthly transition matrix
+
+```{r monthly-trans, fig.height=5}
+monthly <- ra_hist %>%
+  filter(!is.na(market_state)) %>%
+  mutate(ym = floor_date(date, "month")) %>%
+  group_by(ym) %>%
+  slice_tail(n = 1) %>%
+  ungroup()
+
+lvls <- MS_STATE_LEVELS
+
+trans_counts <- monthly %>%
+  mutate(
+    from = factor(as.character(market_state), levels = lvls),
+    to   = factor(as.character(lead(market_state)), levels = lvls)
+  ) %>%
+  filter(!is.na(to)) %>%
+  count(from, to) %>%
+  group_by(from) %>%
+  mutate(prob = n / sum(n)) %>%
+  ungroup()
+
+ggplot(trans_counts, aes(x = to, y = fct_rev(from), fill = prob)) +
+  geom_tile(colour = "white", linewidth = 0.8) +
+  geom_text(aes(label = sprintf("%.0f%%\n(n=%d)", prob * 100, n)),
+            size = 3, colour = "white", fontface = "bold") +
+  scale_fill_gradient(low = "#e5e7eb", high = "#1B2A4A",
+                      labels = percent_format(), name = "Probability") +
+  scale_x_discrete(position = "top") +
+  labs(
+    title    = "Monthly transition matrix (end-of-month state)",
+    subtitle = "Row = current month state | Column = next month state | Diagonal = stayed",
+    x = "Next month →", y = "Current month ↓"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid   = element_blank(),
+    axis.text    = element_text(face = "bold"),
+    legend.position = "right"
+  )
+```
+
+<p class="caption">Diagonal dominance confirms the signal has persistence — states rarely jump two levels in a single month. Most stress episodes (Deterioration → Contraction) follow an adjacent-state path.</p>
+
+## Month-end change frequency
+
+```{r mo-change}
+mo_chg <- monthly %>%
+  mutate(
+    prev_state = lag(market_state),
+    changed    = !is.na(prev_state) & (market_state != prev_state),
+    delta_eq   = (final_eq_weight - lag(final_eq_weight)) * 100
+  ) %>%
+  filter(!is.na(prev_state))
+
+chg_sum <- tibble(
+  Metric = c(
+    "Total months reviewed",
+    "Months with state change",
+    "Change frequency",
+    "Avg |ΔEQ weight| on change",
+    "Median |ΔEQ weight| on change",
+    "Changes ≥ 5pp",
+    "Changes ≥ 10pp"
+  ),
+  Value = c(
+    nrow(mo_chg),
+    sum(mo_chg$changed),
+    scales::percent(mean(mo_chg$changed), accuracy = 0.1),
+    paste0(round(mean(abs(mo_chg$delta_eq[mo_chg$changed]), na.rm=TRUE), 1), "pp"),
+    paste0(round(median(abs(mo_chg$delta_eq[mo_chg$changed]), na.rm=TRUE), 1), "pp"),
+    paste0(sum(abs(mo_chg$delta_eq[mo_chg$changed]) >= 5,  na.rm=TRUE),
+           " (", round(mean(abs(mo_chg$delta_eq[mo_chg$changed]) >= 5,  na.rm=TRUE)*100), "%)"),
+    paste0(sum(abs(mo_chg$delta_eq[mo_chg$changed]) >= 10, na.rm=TRUE),
+           " (", round(mean(abs(mo_chg$delta_eq[mo_chg$changed]) >= 10, na.rm=TRUE)*100), "%)")
+  )
+)
+
+kable(chg_sum, caption = "Month-end allocation change statistics") %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "left", font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, color = "#1B2A4A")
+```
+
+---
+
+# Calibration Notes {.tabset}
+
+<div class="doc-note">
+This section records known design choices that may warrant revisiting as the data history grows.
+</div>
+
+## Thresholds
+
+```{r calib-table}
+calib <- tibble(
+  Parameter = c(
+    "t_fall", "roll_win", "ma_win", "mom_win",
+    "Breadth: Contraction threshold",
+    "Breadth: Deterioration threshold",
+    "Breadth: Late-Cycle threshold",
+    "Breadth: Late-Cycle (EM guard)",
+    "Rotation: Strong threshold",
+    "Rotation: Weak threshold",
+    "EQ weight range",
+    "L2 max adjustment",
+    "min_persist"
+  ),
+  Value = c(
+    paste0(params$t_fall * 100, "%"),
+    paste0(params$roll_win, " days"),
+    paste0(params$ma_win, " days"),
+    paste0(params$mom_win, " days"),
+    "< 40%", "< 55%", "< 55%", "< 70%",
+    "± 4%", "± 1%",
+    "25% – 75%",
+    "± 5pp",
+    paste0(params$min_persist, " days")
+  ),
+  `Set in` = c(
+    "ms_vector_state.R", "ms_vector_state.R",
+    "ms_vector_state.R", "ms_sector_pattern.R",
+    ".classify_state()", ".classify_state()",
+    ".classify_state()", ".classify_state()",
+    "ms_sector_pattern.R", "ms_sector_pattern.R",
+    "ms_risk_allocation.R", "ms_risk_allocation.R",
+    "build_market_state_history()"
+  ),
+  `Rationale` = c(
+    "Matches SPY DD regime engine — consistent across project",
+    "~3 months: long enough for trend, short enough to adapt",
+    "Standard institutional breadth convention",
+    "~3 months momentum: same as standard CTA lookback",
+    "Historically <40% breadth = full stress regime",
+    "55% = majority of sectors breaking down",
+    "55% = majority threshold; 70% = soft ceiling for healthy rally",
+    "EM guard: <70% + EM lagging = late-cycle even if breadth borderline",
+    "4% spread = economically meaningful cyclical leadership",
+    "1% = noise floor; any score outside ±1% is directional",
+    "Generous range — prevents mechanical extremes",
+    "±5pp caps L2 influence at one state-step magnitude",
+    "Sweet spot: eliminates 69% of noise, <18% lag cost"
+  )
+)
+
+kable(calib, caption = "Framework calibration parameters") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 10) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A") %>%
+  column_spec(2, monospace = TRUE)
+```
+
+## Known limitations
+
+```{r limits-table}
+lim <- tibble(
+  `#` = 1:6,
+  Limitation = c(
+    "Breadth uses price level vs MA — not returns-based",
+    "Sector momentum is simple mean (equal-weight across cyclicals/defensives)",
+    "URTH/SPY regimes share the same t_fall threshold",
+    "VWO as EM proxy is broad — includes China, which has idiosyncratic drivers",
+    "No forward-looking inputs (no yield curve, credit spreads, earnings revisions)",
+    "Confirmation lag is symmetric — same delay for both upgrades and downgrades"
+  ),
+  `Implication` = c(
+    "MA crossover can lag price recovery by weeks in sharp V-rebounds",
+    "XLK (largest cyclical) has outsized effective weight via market cap, not captured here",
+    "In a US-only crash (spy falls, URTH holds) the Fall label fires correctly — URTH regime would stay Consolidation",
+    "EM signal may fire late or early in China-specific events (e.g. regulatory crackdowns)",
+    "Framework is backward-looking by construction — early-cycle regime detection may lag by 1–2 months",
+    "Ideally Contraction/Deterioration entries should require fewer days than Expansion exits"
+  ),
+  Priority = c("Low","Low","Low","Medium","Medium","Medium")
+)
+
+kable(lim, caption = "Known limitations and implications") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 11) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, width = "2em") %>%
+  column_spec(4, bold = TRUE,
+              color = c("grey40","grey40","grey40","#ea580c","#ea580c","#ea580c"))
+```
+
+---
+
+```{r footer}
+cat(sprintf(
+  "_Generated %s &nbsp;|&nbsp; min\\_persist = %d days &nbsp;|&nbsp; T\\_fall = %.0f%% &nbsp;|&nbsp; History: %.1f years_",
+  format(Sys.Date(), "%Y-%m-%d"),
+  as.integer(params$min_persist),
+  params$t_fall * 100,
+  n_years
+))
+```

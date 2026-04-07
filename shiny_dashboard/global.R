@@ -33,10 +33,13 @@ source("modules/mod_comp.R")
 source("modules/mod_technical.R")
 source("modules/mod_regime.R")
 source("modules/mod_riskret.R")
+source("modules/mod_surprise.R")
+source("modules/mod_patterns.R")
 source(here::here("scripts_state_machine/sm_engine.R"))
 source(here::here("scripts_state_machine/sm_visuals.R"))
 source(here::here("key_plots/chart_ma200_signal_panel.R"))
 source(here::here("key_plots/chart_multi_wealth_endlabel.R"))
+source(here::here("key_plots/chart_stock_matrix.R"))
 source(here::here("key_plots/chart_regime_rel_overlay.R"))
 source(here::here("scripts_spy_dd_regime/spy_dd_regime_rel.R"))
 source(here::here("utility/plot_calendar_perf.R"))
@@ -48,7 +51,8 @@ rm(.spy_lines)
 
 # ── Root project bridge ────────────────────────────────────────────────────────
 if (!exists("project_tree")) source(here::here("project_tree.R"))
-if (!exists("etf_metadata")) source(here::here(project_tree$scripts$init))
+if (!exists("etf_metadata") || !"short_name" %in% names(etf_metadata))
+  source(here::here(project_tree$scripts$init))
 
 if (!exists("raw_data"))       raw_data       <- read_rds(here::here(project_tree$products$raw_p_d))
 if (!exists("tech_summary"))   tech_summary   <- read_rds(here::here(project_tree$products$tech_summary))
@@ -66,7 +70,7 @@ mtd_start <- floor_date(today, "month")
 w52_start <- today - 365
 
 # ── Build performance table ────────────────────────────────────────────────────
-if (exists("perf_data")) return(invisible(NULL))   # skip if already built
+if (exists("perf_data") && "short_name" %in% names(perf_data)) return(invisible(NULL))
 
 perf_data <- raw_data %>%
   group_by(symbol) %>%
@@ -91,7 +95,7 @@ perf_data <- raw_data %>%
     .groups   = "drop"
   ) %>%
   left_join(
-    etf_metadata %>% select(ticker, name, asset_class, pf_function,
+    etf_metadata %>% select(ticker, name, short_name, asset_class, pf_function,
                             tree_level, sub_block),
     by = c("symbol" = "ticker")
   ) %>%
@@ -126,11 +130,43 @@ CLUSTER_MAP <- tibble::tribble(
 perf_data <- perf_data %>%
   left_join(CLUSTER_MAP,  by = c("symbol" = "ticker")) %>%
   mutate(cluster = coalesce(cluster, "Rest of Universe")) %>%
-  left_join(SAA_CONFIG, by = c("symbol" = "ticker"))
+  left_join(SAA_CONFIG,    by = c("symbol" = "ticker")) %>%
+  left_join(DISPLAY_RANK,  by = c("symbol" = "ticker")) %>%
+  mutate(display_rank = coalesce(display_rank, 9999L))
   # saa_depth / saa_bucket = NA for tickers outside the SAA tree
+  # display_rank = 9999 for tickers not in DISPLAY_RANK
 
 # Benchmark reference row (used by KPI strip)
 spy_row <- perf_data %>% filter(symbol == "SPY")
+
+# ── Equity coverage list (EquityCoreList.xlsx) ────────────────────────────────
+if (!exists("eq_coverage")) {
+  eq_coverage <- readxl::read_excel(
+    here::here("input/EquityCoreList.xlsx"), skip = 3
+  ) %>%
+    filter(!is.na(Bloomberg)) %>%
+    mutate(
+      ticker     = sub(" [A-Z]{2}$", "", Bloomberg),
+      region     = coalesce(Region, "Unknown"),
+      sector     = coalesce(`Factset Sector`, "Other"),
+      exp_ret    = as.numeric(`Expected Return`),
+      tgt_price  = as.numeric(`Target Price`),
+      price      = as.numeric(Price),
+      upside_pct = round((tgt_price / price - 1) * 100, 1),
+      div_yield  = as.numeric(`Dividend Yield`),
+      pe         = suppressWarnings(as.numeric(`P/E`)),
+      eps25      = as.numeric(`Earnings per Share (EPS) 2025`),
+      eps26      = as.numeric(`Earnings per Share (EPS) 2026(E)`),
+      top_pick   = `Top Picks` == "Yes",
+      rating     = Rating,
+      risk       = Risk,
+      analyst    = Analyst,
+      mkt_cap    = `Market Value in bn`
+    ) %>%
+    select(ticker, Company, region, sector, rating, risk, top_pick,
+           exp_ret, tgt_price, price, upside_pct, div_yield,
+           pe, eps25, eps26, analyst, mkt_cap)
+}
 
 # ── 200DMA trend signals (used by Plots tab) ───────────────────────────────────
 # Computed once at launch from raw_data; stats::filter() = base R rolling mean

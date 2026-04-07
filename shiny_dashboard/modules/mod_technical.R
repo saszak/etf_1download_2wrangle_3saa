@@ -35,7 +35,7 @@ mod_technical_server <- function(id, filtered) {
     ns <- session$ns
 
     avail_tickers <- reactive({
-      syms <- filtered()$symbol
+      syms <- filtered() %>% arrange(display_rank) %>% pull(symbol)
       syms[syms %in% colnames(xts_ret_shiny)]
     })
 

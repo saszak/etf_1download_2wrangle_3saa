@@ -88,6 +88,8 @@ source(here("key_plots/chart_multi_wealth_endlabel.R"))
 source(here("key_plots/chart_ma200_signal_panel.R"))
 source(here("key_plots/chart_pe_bands.R"))
 source(here("key_plots/calendar_heatmap.R"))
+source(here("key_plots/chart_ma_cumret.R"))
+source(here("key_plots/chart_ma_range.R"))
 source(here("shiny_dashboard/saa_config.R"))   # SAA_CONFIG: has saa_bucket + weight
 
 # ── Shared objects ─────────────────────────────────────────────────────────────
@@ -133,6 +135,10 @@ ref <- tibble::tribble(
   "DAA Framework",     "plot_ma200_signal_panel",      "key_plots/chart_ma200_signal_panel.R",        "(trend_signals_tbl, saa_tbl, tqs=NULL)",
   "DAA Framework",     "plot_stacked_weight_timeline", "key_plots/chart_stacked_weight_timeline.R",   "(weight_history_tbl, saa_tbl, rt)",
   "DAA Framework",     "plot_dd_frontier",             "key_plots/chart_dd_frontier.R",               "(dd_frontier_data, weight_marks=c(0.10, 0.20))",
+  "MA / Range",        "plot_ma_cumret",               "key_plots/chart_ma_cumret.R",                 "(ticker, xts_ret, from_date='2020-01-01', ma1=50, ma2=200, t_fall=0.10)",
+  "MA / Range",        "plot_ma_range",                "key_plots/chart_ma_range.R",                  "(ticker, xts_ret, from_date='2020-01-01', ma1=50, ma2=200, win_52w=252, compact=FALSE)",
+  "MA / Range",        "plot_ma_gauge",               "key_plots/chart_ma_range.R",                  "(tickers, xts_ret, ma1=50, ma2=200, win_52w=252, flip=FALSE)",
+  "MA / Range",        "plot_gauge_spc",              "key_plots/chart_ma_range.R",                  "(tickers, xts_ret, ma1=50, ma2=200, win_52w=252)",
   "Market Context",    "plot_pe_bands",                "key_plots/chart_pe_bands.R",                  "(n_years=10, dark=TRUE, force_refresh=FALSE)",
   "Market Context",    "plot_shiller_cape",            "key_plots/chart_pe_bands.R",                  "()",
   "Market Context",    "plot_calendar_heatmap",        "key_plots/calendar_heatmap.R",                "(ticker='SPY', n_yr=5)",
@@ -451,7 +457,66 @@ plot_ma200_signal_panel(trend_signals, saa_tbl_ma200)$eq
 
 ---
 
-## 8 · Market Context
+## 8 · MA / Range
+
+### plot_ma_cumret
+
+<div class="fn-box">plot_ma_cumret(ticker, xts_ret, from_date="2020-01-01", ma1=50, ma2=200, t_fall=0.10)</div>
+<span class="file-tag">key_plots/chart_ma_cumret.R</span>
+
+Two-panel: cumulative return + MA lines with amber/red ribbon shading (below short / long MA) + fall trigger line; drawdown ribbon below. Y-axis = wealth index (base 1.0).
+
+```{r pd-ma-cumret, fig.height=7, fig.cap="**Fig 8.1** `plot_ma_cumret('URTH', xts_ret)` — cumulative return vs 50/200DMA with shading and drawdown panel"}
+plot_ma_cumret("URTH", xts_ret)
+```
+
+### plot_ma_range — 3-panel
+
+<div class="fn-box">plot_ma_range(ticker, xts_ret, from_date="2020-01-01", ma1=50, ma2=200, win_52w=252, compact=FALSE)</div>
+<span class="file-tag">key_plots/chart_ma_range.R</span>
+
+Three-panel: cumulative return + 52W high/low grey band + MA lines; % distance from 52W High (red) and 52W Low (green); % distance from 50DMA (amber) and 200DMA (navy). Subtitle shows one-line snapshot of all 4 distances.
+
+```{r pd-ma-range, fig.height=9, fig.cap="**Fig 8.2** `plot_ma_range('URTH', xts_ret)` — 3-panel: price+band / 52W distances / MA distances"}
+plot_ma_range("URTH", xts_ret)
+```
+
+### plot_ma_range — compact (2-panel)
+
+<div class="fn-box">plot_ma_range(ticker, xts_ret, ..., compact=TRUE)</div>
+<span class="file-tag">key_plots/chart_ma_range.R</span>
+
+Two-panel condensed: same P1 as above; single distance strip showing all 4 distances together — 52W Hi (red solid), 52W Lo (green solid), 50DMA (amber dashed), 200DMA (navy dashed).
+
+```{r pd-ma-range-compact, fig.height=7, fig.cap="**Fig 8.3** `plot_ma_range('URTH', xts_ret, compact=TRUE)` — 2-panel: price+band / all 4 distances on one strip"}
+plot_ma_range("URTH", xts_ret, compact = TRUE)
+```
+
+### plot_ma_gauge — single ruler / multi-ticker
+
+<div class="fn-box">plot_ma_gauge(tickers, xts_ret, ma1=50, ma2=200, win_52w=252)</div>
+<span class="file-tag">key_plots/chart_ma_range.R</span>
+
+Single horizontal ruler per ticker. X-axis = % distance from current price (0 = price). References: 52W Lo (green) ← left | 200DMA (navy) | 50DMA (amber) | ◆ Price (0%) | 52W Hi (red) → right. Pass a vector of tickers for a multi-row comparison.
+
+```{r pd-ma-gauge, fig.height=4, fig.cap="**Fig 8.4** `plot_ma_gauge(c('SPY','QQQ','GLD','AGG','URTH'), xts_ret)` — horizontal ruler: all references on one line per ticker"}
+plot_ma_gauge(c("SPY", "QQQ", "GLD", "AGG", "URTH"), xts_ret)
+```
+
+### plot_gauge_spc — SPC cross-sectional control chart
+
+<div class="fn-box">plot_gauge_spc(tickers, xts_ret, ma1=50, ma2=200, win_52w=252)</div>
+<span class="file-tag">key_plots/chart_ma_range.R</span>
+
+Shewhart-inspired cross-sectional control chart. Centre = 200DMA (0%). Measurement = % distance of current price from 200DMA. Control zones from median annualised 52W volatility (σ): green ±1σ / amber ±2σ. Grey bars = 52W Hi–Lo range. Yellow circle = 50DMA. State-coloured diamond = current price. Lollipop stem from 0 to measurement coloured by market state. Conceptual precedent: Shewhart (1924), phase diagrams, sufficient statistics.
+
+```{r pd-gauge-spc, fig.height=5, fig.cap="**Fig 8.5** `plot_gauge_spc(c('SPY','QQQ','URTH','AGG','XLK','SMH'), xts_ret)` — SPC control chart: % from 200DMA, zone bands, 52W range bars, state-coloured lollipops"}
+plot_gauge_spc(c("SPY", "QQQ", "URTH", "AGG", "XLK", "SMH"), xts_ret)
+```
+
+---
+
+## 9 · Market Context  {#market-context}
 
 ### plot_pe_bands
 
@@ -460,7 +525,7 @@ plot_ma200_signal_panel(trend_signals, saa_tbl_ma200)$eq
 
 Bloomberg-style S&P 500 P/E price bands. Five colour bands (Avg ±1SD / ±2SD) vs actual price. Data auto-downloaded and cached.
 
-```{r pd-pe, fig.height=7, fig.cap="**Fig 8.1** `plot_pe_bands()` — Bloomberg-style S&P 500 P/E price bands"}
+```{r pd-pe, fig.height=7, fig.cap="**Fig 9.1** `plot_pe_bands()` — Bloomberg-style S&P 500 P/E price bands"}
 plot_pe_bands()
 ```
 
@@ -471,7 +536,7 @@ plot_pe_bands()
 
 Shiller CAPE (P/E10) since 1950. Orange = CAPE, purple dashed = long-run avg, red/blue = ±1σ / ±2σ.
 
-```{r pd-cape, fig.height=6, fig.cap="**Fig 8.2** `plot_shiller_cape()` — Shiller CAPE since 1950, ±1σ/±2σ bands"}
+```{r pd-cape, fig.height=6, fig.cap="**Fig 9.2** `plot_shiller_cape()` — Shiller CAPE since 1950, ±1σ/±2σ bands"}
 plot_shiller_cape()
 ```
 
@@ -482,7 +547,7 @@ plot_shiller_cape()
 
 Calendar grid: each cell = one trading day, fill = log return. Red = down, blue = up.
 
-```{r pd-cal-heatmap, fig.height=9, fig.cap="**Fig 8.3** `plot_calendar_heatmap('SPY', n_yr=5)` — daily return calendar grid, red=down blue=up"}
+```{r pd-cal-heatmap, fig.height=9, fig.cap="**Fig 9.3** `plot_calendar_heatmap('SPY', n_yr=5)` — daily return calendar grid, red=down blue=up"}
 plot_calendar_heatmap("SPY", n_yr = 5)
 ```
 
@@ -493,13 +558,13 @@ plot_calendar_heatmap("SPY", n_yr = 5)
 
 Current year vs analog years (similar YTD path). Grey = all years, blue = analogs, red = current, shaded cone = 10–90th pct forward.
 
-```{r pd-analog, fig.height=7, fig.cap="**Fig 8.4** `plot_calendar_analog(xts_ret[,'SPY'], rt)` — current year vs analog years, forward cone"}
+```{r pd-analog, fig.height=7, fig.cap="**Fig 9.4** `plot_calendar_analog(xts_ret[,'SPY'], rt)` — current year vs analog years, forward cone"}
 plot_calendar_analog(xts_ret[, "SPY"], rt = rt)
 ```
 
 ---
 
-## 9 · Calendar Performance
+## 10 · Calendar Performance
 
 ### plot_calendar_perf
 

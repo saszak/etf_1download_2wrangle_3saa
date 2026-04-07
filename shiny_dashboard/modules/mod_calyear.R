@@ -93,9 +93,11 @@ mod_calyear_server <- function(id, filtered, relative_mode, bmk) {
           plot_id <- paste0("plot_", i)
 
           output[[plot_id]] <- renderPlot({
+            tk_name <- perf_data$short_name[perf_data$symbol == tk][1] %||% ""
+            tk_lbl  <- .tk_label(tk, tk_name)
             p_abs <- tryCatch(
               plot_calendar_analog(xts_ret_shiny[, tk], rt_shiny) +
-                labs(title = paste0(tk, "  \u2014  Absolute")),
+                labs(title = paste0(tk_lbl, "  \u2014  Absolute")),
               error = function(e) {
                 ggplot() + annotate("text", x=0.5, y=0.5,
                   label = paste0(tk, " abs: ", conditionMessage(e)),
@@ -107,7 +109,7 @@ mod_calyear_server <- function(id, filtered, relative_mode, bmk) {
             p_rel <- if (has_rel) {
               tryCatch(
                 plot_calendar_analog(rx[, tk], rt_shiny) +
-                  labs(title = paste0(tk, "  \u2014  vs ", bl, " (\u03b1)")),
+                  labs(title = paste0(tk_lbl, "  \u2014  vs ", bl, " (\u03b1)")),
                 error = function(e) {
                   ggplot() + annotate("text", x=0.5, y=0.5,
                     label = paste0(tk, " rel: ", conditionMessage(e)),

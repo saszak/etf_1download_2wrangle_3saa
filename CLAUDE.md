@@ -15,6 +15,10 @@ findings to build a concrete SAA portfolio with institutional mapping.
 | `MASTER` | "SPY" | Benchmark throughout all analyses |
 | 200DMA thresholds | upper = +4%, lower = −2% | Hysteresis in `plot_200DMA()` |
 | Rolling corr window | 60 days | Safe haven rolling correlation (Section 4) |
+| `min_persist` | 5 days (default) | Market state confirmation filter — `build_market_state_history()` |
+| MS roll_win | 60 days | US premium / EM appetite spread window |
+| MS mom_win | 63 days | Sector rotation momentum window (L2) |
+| MS EQ range | 25%–75% | Allocation clip bounds in `ms_risk_allocation.R` |
 
 ---
 
@@ -66,6 +70,25 @@ scripts_daa_saa_taa/
   08_enhancer_screen.R        ← 3-STAGE ENHANCER SCREEN: candidates (OR-screen) →
                                  context score (rolling IR + regime α + 200DMA + momentum) →
                                  select_enhancers() with ρ guard → plot_xts_pair per selection
+  plot_rebal_drift.R          ← REBALANCING DRIFT STUDY (5 strategies vs BaH):
+                                 Daily / Quarterly / Annual / Threshold±10% / Threshold±5%
+                                 Builds: main_view (M1–M8 + table T), appendix (A1–A8),
+                                 fig_D, fig_Q, fig_AR, fig_TR10, fig_TR5 via build_pairwise()
+                                 knitr.in.progress guards; sources into rebalancing_drift_guide.Rmd
+  saa_overlay_workflow.R      ← END-TO-END SAA OVERLAY WORKFLOW (v1):
+                                 build_saa_ret()            → daily-rebal binary SAA → xts_ret
+                                 rank_enhancers()           → top N by full_ir vs SAA
+                                 rank_stabilizers()         → top N by dd_reduction vs SAA
+                                 fingerprint_candidates()   → screen_ticker() per candidate
+                                 overlay_summary_heatmap()  → two-panel ranking heatmap
+                                 backtest_ls_overlay()      → P1 wealth + P2 spread + P3 stats
+                                 run_saa_overlay_workflow() → master orchestrator (all steps)
+                                 Overlay: Option B — r_SAA + α*(r_candidate − r_SAA)
+                                 Backtest: Long overlay-SAA / Short original-SAA (spread PnL)
+  saa_overlay_workflow_guide.Rmd ← pedagogical guide for saa_overlay_workflow.R:
+                                 design choices table, all function signatures,
+                                 live SPY/IEF 60/40 example, enhancer + stabilizer
+                                 backtest interpretation, advanced usage patterns
 
 scripts_saa_taa/
   saa_tree.R                  ← SAA_PORTFOLIO tribble, plot_saa_ggbar(),
@@ -85,14 +108,41 @@ scripts_safe_haven_regime/
   method2_logistic_regime.R   ← LASSO logistic (AUC ~0.72 at 63-day horizon)
   method3_regime_covariance.R ← PCA eigenanalysis on Fall-minus-Consolidation covariance
 
+scripts_market_state/
+  ms_vector_state.R           ← L1: build_market_state_history(), current_market_state(),
+                                 print_market_state()
+                                 5 signals: URTH regime | SPY regime | US premium (60d) |
+                                 EM appetite (60d) | sector breadth (% above 200DMA)
+                                 5 states: Expansion(65%) / US-Led(58%) / Late-Cycle(50%) /
+                                           Deterioration(42%) / Contraction(35%)
+                                 min_persist param: N days new state must hold before confirmed
+  ms_sector_pattern.R         ← L2: build_sector_pattern_history(), current_sector_pattern()
+                                 Cyclicals (XLK/XLY/XLB/XLE/XLI) vs Defensives (XLU/XLP/XLV)
+                                 63d momentum spread → Strong Risk-On/Risk-On/Neutral/Risk-Off/Strong Risk-Off
+                                 Adjustment: ±5pp (strong) / ±2pp (weak) / 0pp (neutral)
+  ms_risk_allocation.R        ← L3: build_risk_allocation_history(), print_risk_allocation()
+                                 Combines L1 base weight + L2 adjustment → final EQ/FI
+                                 Clipped to [25%, 75%]. Passes min_persist through to L1.
+  ms_visuals.R                ← plot_ms_timeline(), plot_ms_signal_strip(),
+                                 plot_ms_allocation(), plot_ms_dashboard()
+                                 Dashboard saved to key_plots/ms_dashboard.png
+
 Rmd/
   executive_summary.Rmd       ← THE master summary — 8 sections, sources all scripts
+  market_state_report.Rmd     ← documentation + analysis for 3-layer market state framework
+                                 params: min_persist(5), t_fall(0.10), roll_win(60),
+                                         ma_win(200), mom_win(63)
   spy_regime_statemachine_report.Rmd
   safe_haven_regime_report.Rmd
   long_short_overlay_report.Rmd
   exante_hypothesis_report.Rmd  ← parameterised: render via render_exante_report()
   pair_analysis_portfolio_construction.Rmd
   universe_pair_analysis_v2.Rmd
+  eq_factsheets_batch.Rmd     ← batch factsheet for all equity ETFs
+                                 params: bmk, t_fall, tickers, show_full_factsheet
+  rebalancing_drift_guide.Rmd ← pedagogical guide: volatility harvesting theory + math,
+                                 drift mechanics, 5-strategy pairwise comparisons,
+                                 optimal frequency discussion; sources plot_rebal_drift.R
 ```
 
 ---
@@ -158,7 +208,15 @@ Root causes: (1) SAA universe drag from international diversification during US-
 (3) tilts too small to overcome base drag.
 Do NOT attempt to improve return via regime rotation. The right objective is DD reduction.
 
-**7. DD Optimizer objective (confirmed)**
+**7. Rebalancing drift and volatility harvesting (confirmed)**
+Daily rebalancing beats Buy & Hold in total wealth for SPY/IEF 60/40 despite SPY's clear long-run outperformance.
+Mechanism: rebalancing bonus ≈ ½ × w_SPY × w_IEF × σ²(SPY − IEF) — always positive, always a free lunch from variance.
+Drift (BaH − daily rebal) is negative in aggregate because BaH enters every Fall maximally overweight (~80% SPY) while daily rebal always enters at 60% — Fall-regime spikes dominate the cumulative total.
+Optimal real-world frequency: monthly/quarterly calendar or ±5% threshold (captures ~85% of daily bonus at 1/20th of the trading activity).
+Threshold rebalancing dominates calendar: it fires when the bonus is largest (volatile periods = wide spread variance) and is implicitly regime-aware.
+Source: `scripts_daa_saa_taa/plot_rebal_drift.R` + `Rmd/rebalancing_drift_guide.Rmd`.
+
+**8. DD Optimizer objective (confirmed)**
 The project's primary portfolio-construction question is:
 "Given we accept SPY/IEF 60/40 return, what is the minimum-cost overlay
 that reduces MaxDD from ~23% to ~15%?"
@@ -295,6 +353,35 @@ fs_render("GLD", bmk = "SPY", ret_xts = xts_ret, rt = rt)
 | `run_regime_rel_analysis()` | `spy_dd_regime_rel.R` | Relative regime (ticker vs SPY) |
 | `run_multi_ticker_regime()` | `regime_multi_ticker.R` | Multi-ticker regime heatmap + summary |
 | `run_sm_diagram_rel()` | `spy_statemachine_diagram_rel.R` | State machine diagram bundle |
+
+### Market state framework (3-layer)
+```r
+source(here("scripts_market_state/ms_vector_state.R"))     # L1
+source(here("scripts_market_state/ms_sector_pattern.R"))   # L2
+source(here("scripts_market_state/ms_risk_allocation.R"))  # L3
+source(here("scripts_market_state/ms_visuals.R"))          # plots
+
+ms_hist <- build_market_state_history(xts_ret, min_persist = 5L)
+sp_hist <- build_sector_pattern_history(xts_ret)
+ra_hist <- build_risk_allocation_history(xts_ret, min_persist = 5L)
+
+print_market_state(ms_hist)       # console summary with current state
+print_risk_allocation(ra_hist)    # current EQ/FI allocation
+plot_ms_dashboard(xts_ret)        # 3-panel patchwork dashboard
+```
+
+### Rendering parameterised Rmds
+Always use `envir = new.env()` to avoid `params already exists` errors:
+```r
+rmarkdown::render(
+  here::here("Rmd/market_state_report.Rmd"),
+  output_file = here::here("03_reports/market_state_report.html"),
+  params = list(min_persist = 5, t_fall = 0.10),
+  envir  = new.env()
+)
+# output_file must be absolute path (here::here()) when pointing outside Rmd directory
+# Never use relative paths for output_file in parameterised renders
+```
 
 ---
 

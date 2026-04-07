@@ -5,7 +5,13 @@
 #     output_file = here::here("03_reports/eq_factsheets_batch.html")
 #   )
 #
-# Custom benchmark or subset via params:
+# Quick test — 3 tickers, no 8-panel (fast, ~2 min):
+#   rmarkdown::render(..., params = list(tickers = c("XLK","QQQ","GLD")))
+#
+# Full run with 8-panel factsheets (~45 min):
+#   rmarkdown::render(..., params = list(show_full_factsheet = TRUE))
+#
+# Custom benchmark:
 #   rmarkdown::render(..., params = list(bmk = "URTH", t_fall = 0.10))
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -24,8 +30,10 @@ output:
     highlight: tango
     fig_caption: true
 params:
-  bmk:    "SPY"
-  t_fall: 0.10
+  bmk:               "SPY"
+  t_fall:            0.10
+  tickers:           !r NULL   # NULL = full g_eq_tickers; or c("XLK","QQQ","GLD")
+  show_full_factsheet: false    # true = include 8-panel combined (slow); false = skip
 ---
 
 ```{css, echo=FALSE}
@@ -57,7 +65,8 @@ library(here)
 select <- dplyr::select
 
 # ── params fallback (interactive / render-without-params) ─────────────────────
-if (!exists("params")) params <- list(bmk = "SPY", t_fall = 0.10)
+if (!exists("params")) params <- list(bmk = "SPY", t_fall = 0.10,
+                                      tickers = NULL, show_full_factsheet = FALSE)
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 if (!exists("xts_ret"))
@@ -70,8 +79,7 @@ if (!exists("etf_metadata"))
 if (!exists("build_regime_table"))
   source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
 
-if (!exists("plot_regime_overlay_ext") || !exists("plot_regime_triple"))
-  source(here("key_plots/chart_regime_rel_overlay.R"))
+source(here("key_plots/chart_regime_rel_overlay.R"))   # always reload — contains pp fix
 
 source(here("utility/factsheet_functions.R"))
 
@@ -81,6 +89,7 @@ rt <- build_regime_table(xts_ret[, params$bmk], params$t_fall)
 # ── Equity tickers: in universe AND in xts_ret, excluding the benchmark ───────
 eq_tickers <- intersect(g_eq_tickers, colnames(xts_ret))
 eq_tickers <- eq_tickers[eq_tickers != params$bmk]
+if (!is.null(params$tickers)) eq_tickers <- intersect(params$tickers, eq_tickers)
 ```
 
 ## Universe overview
@@ -105,127 +114,102 @@ kable(overview,
 
 ---
 
-```{r batch-factsheets, results='asis'}
-# ── Per-ticker section template ───────────────────────────────────────────────
-# Each ticker gets:
-#   1. Metadata badge (class / function / date range)
-#   2. Summary stats table
-#   3. Triple overlay  (plot_regime_triple) — cumret + rolling 12m relret
-#   4. Regime overlay  (plot_regime_overlay_ext) — BMK bars + ticker line + rel area
-#   5. 8-panel factsheet (fs_render combined)
-#   6. Own regime stats (plot_regime_stats)
-#
-# knit_child runs each block in the parent environment so variables defined in
-# earlier sub-chunks (fs_out) are available in later ones within the same ticker.
+```{r batch-factsheets, results='asis', fig.width=13}
+# ── Direct loop — no knit_child nesting ───────────────────────────────────────
+# Per ticker: markdown header + stats table + triple overlay + regime stats.
+# 8-panel factsheet only when show_full_factsheet = TRUE.
+# All plots printed directly; knitr handles figure output automatically.
 
-template <- paste0("
-
-## {{tk}} \u2014 {{tk_name}}
-
-<div class='ticker-badge'>
-<strong>{{tk}}</strong> &nbsp;|&nbsp;
-Class: {{tk_class}} &nbsp;|&nbsp;
-Function: {{tk_pfn}} &nbsp;|&nbsp;
-Period: {{tk_start}} \u2192 {{tk_end}} &nbsp;|&nbsp;
-Benchmark: {{bmk}}
-</div>
-
-", "\x60\x60\x60", "{r s1-{{tk}}, fig.show='asis'}
-.fs_out_{{tk}} <- tryCatch(
-  suppressMessages(
-    fs_render('{{tk}}', bmk = params$bmk, ret_xts = xts_ret, rt = rt)
-  ),
-  error = function(e) { message('fs_render failed for {{tk}}: ', conditionMessage(e)); NULL }
-)
-if (!is.null(.fs_out_{{tk}})) {
-  kable(.fs_out_{{tk}}$stats,
-        align   = c('l','r','r','r','r','r'),
-        caption = paste0('Summary statistics \u2014 {{tk}} vs {{bmk}}')) %>%
-    kable_styling(full_width = FALSE,
-                  bootstrap_options = c('hover','condensed','bordered'),
-                  position = 'center', font_size = 12) %>%
-    row_spec(0, bold = TRUE, background = '#1B2A4A', color = 'white') %>%
-    row_spec(1, background = '#F0F4FA') %>%
-    row_spec(3, bold = TRUE) %>%
-    column_spec(1, bold = TRUE, color = '#1B2A4A') %>%
-    print()
-} else { cat('> Stats table unavailable for {{tk}}.\n') }
-", "\x60\x60\x60", "
-
-", "\x60\x60\x60", "{r s1b-{{tk}}, fig.height=9, fig.cap='Triple overlay + rolling 12m relative return \u2014 {{tk}} vs {{bmk}}'}
-tryCatch(
-  print(plot_regime_triple('{{tk}}', bmk = '{{bmk}}', xts_ret = xts_ret)),
-  error = function(e) ggplot() +
-    annotate('text', x=.5, y=.5, colour='grey50', size=3.5,
-             label = paste0('Triple error ({{tk}}): ', conditionMessage(e))) + theme_void()
-)
-", "\x60\x60\x60", "
-
-", "\x60\x60\x60", "{r s2-{{tk}}, fig.height=8, fig.cap='Regime overlay \u2014 {{tk}} vs {{bmk}}'}
-tryCatch(
-  print(plot_regime_overlay_ext('{{tk}}', bmk = '{{bmk}}', xts_ret = xts_ret)),
-  error = function(e) ggplot() +
-    annotate('text', x=.5, y=.5, colour='grey50', size=3.5,
-             label = paste0('Overlay error ({{tk}}): ', conditionMessage(e))) + theme_void()
-)
-", "\x60\x60\x60", "
-
-", "\x60\x60\x60", "{r s3-{{tk}}, fig.height=22, fig.cap='8-panel factsheet \u2014 {{tk}} vs {{bmk}}'}
-if (!is.null(.fs_out_{{tk}})) {
-  print(.fs_out_{{tk}}$combined)
-} else {
-  tryCatch(
-    print(suppressMessages(
-      fs_render('{{tk}}', bmk = params$bmk, ret_xts = xts_ret, rt = rt)
-    )$combined),
-    error = function(e) ggplot() +
-      annotate('text', x=.5, y=.5, colour='grey50', size=3.5,
-               label = paste0('Factsheet error ({{tk}}): ', conditionMessage(e))) + theme_void()
-  )
-}
-", "\x60\x60\x60", "
-
-", "\x60\x60\x60", "{r s4-{{tk}}, fig.height=5, fig.cap='Own regime statistics \u2014 {{tk}}'}
-tryCatch(
-  print(plot_regime_stats(xts_ret[, '{{tk}}'], asset_name = '{{tk}}')),
-  error = function(e) ggplot() +
-    annotate('text', x=.5, y=.5, colour='grey50', size=3.5,
-             label = paste0('Regime stats error ({{tk}}): ', conditionMessage(e))) + theme_void()
-)
-", "\x60\x60\x60", "
-
-<div class='section-div'></div>
-
-")
-
-# ── Render ────────────────────────────────────────────────────────────────────
-sections <- lapply(eq_tickers, function(tk) {
+for (tk in eq_tickers) {
 
   m        <- etf_metadata[etf_metadata$ticker == tk, ]
   tk_name  <- if (nrow(m) > 0) m$name[1]        else tk
   tk_class <- if (nrow(m) > 0) m$asset_class[1] else "Equity"
-  tk_pfn   <- if (nrow(m) > 0) m$pf_function[1] else "—"
-
+  tk_pfn   <- if (nrow(m) > 0) m$pf_function[1] else "\u2014"
   col_data <- xts_ret[, tk]
   valid    <- !is.na(col_data)
-  tk_start <- if (any(valid)) format(min(index(col_data[valid]))) else "—"
-  tk_end   <- if (any(valid)) format(max(index(col_data[valid]))) else "—"
+  tk_start <- if (any(valid)) format(min(index(col_data[valid]))) else "\u2014"
+  tk_end   <- if (any(valid)) format(max(index(col_data[valid]))) else "\u2014"
 
-  expanded <- knitr::knit_expand(
-    text     = template,
-    tk       = tk,
-    tk_name  = tk_name,
-    tk_class = tk_class,
-    tk_pfn   = tk_pfn,
-    tk_start = tk_start,
-    tk_end   = tk_end,
-    bmk      = params$bmk
+  # ── Section header ─────────────────────────────────────────────────────────
+  cat(sprintf(
+    "\n\n## %s \u2014 %s\n\n<div class='ticker-badge'><strong>%s</strong> &nbsp;|&nbsp; Class: %s &nbsp;|&nbsp; Function: %s &nbsp;|&nbsp; Period: %s \u2192 %s &nbsp;|&nbsp; Benchmark: %s</div>\n\n",
+    tk, tk_name, tk, tk_class, tk_pfn, tk_start, tk_end, params$bmk
+  ))
+
+  # ── Stats table ────────────────────────────────────────────────────────────
+  tryCatch({
+    r1  <- as.numeric(coredata(xts_ret[, tk]))
+    r2  <- as.numeric(coredata(xts_ret[, params$bmk]))
+    idx <- which(!is.na(r1) & !is.na(r2))
+    r1  <- r1[idx]; r2 <- r2[idx]; rs <- r1 - r2
+    ann <- function(r) (prod(1+r))^(252/length(r)) - 1
+    vol <- function(r) sd(r, na.rm=TRUE) * sqrt(252)
+    mdd <- function(r) { w <- cumprod(1+r); min((w - cummax(w))/cummax(w)) }
+    stats_tbl <- tibble::tibble(
+      Series       = c(tk, params$bmk, paste0(tk, " \u2212 ", params$bmk)),
+      `Ann Return` = scales::percent(c(ann(r1), ann(r2), ann(rs)), accuracy=0.1),
+      `Ann Vol`    = scales::percent(c(vol(r1), vol(r2), vol(rs)), accuracy=0.1),
+      `Sharpe`     = round(c(ann(r1)/vol(r1), ann(r2)/vol(r2), ann(rs)/vol(rs)), 2),
+      `Max DD`     = scales::percent(c(mdd(r1), mdd(r2), mdd(rs)), accuracy=0.1)
+    )
+    print(kable(stats_tbl, align=c("l","r","r","r","r"),
+                caption=paste0("Summary statistics \u2014 ", tk, " vs ", params$bmk)) %>%
+      kable_styling(full_width=FALSE,
+                    bootstrap_options=c("hover","condensed","bordered"),
+                    position="center", font_size=12) %>%
+      row_spec(0, bold=TRUE, background="#1B2A4A", color="white") %>%
+      row_spec(1, background="#F0F4FA") %>%
+      row_spec(3, bold=TRUE) %>%
+      column_spec(1, bold=TRUE, color="#1B2A4A"))
+  }, error = function(e) cat("> Stats error for", tk, ":", conditionMessage(e), "\n"))
+
+  # ── Plot 1: triple overlay + rolling 12m relret ────────────────────────────
+  knitr::opts_chunk$set(fig.height = 9)
+  tryCatch(
+    print(plot_regime_triple(tk, bmk = params$bmk, xts_ret = xts_ret)),
+    error = function(e) {
+      print(ggplot() + annotate("text", x=.5, y=.5, colour="grey50", size=3.5,
+        label=paste0("Triple error (", tk, "): ", conditionMessage(e))) + theme_void())
+    }
   )
 
-  knitr::knit_child(text = expanded, envir = environment(), quiet = TRUE)
-})
+  # ── Plot 2: regime overlay ext ─────────────────────────────────────────────
+  knitr::opts_chunk$set(fig.height = 8)
+  tryCatch(
+    print(plot_regime_overlay_ext(tk, bmk = params$bmk, xts_ret = xts_ret)),
+    error = function(e) {
+      print(ggplot() + annotate("text", x=.5, y=.5, colour="grey50", size=3.5,
+        label=paste0("Overlay error (", tk, "): ", conditionMessage(e))) + theme_void())
+    }
+  )
 
-cat(paste(unlist(sections), collapse = "\n"))
+  # ── Plot 3: own regime stats ───────────────────────────────────────────────
+  knitr::opts_chunk$set(fig.height = 5)
+  tryCatch(
+    print(plot_regime_stats(xts_ret[, tk], asset_name = tk)),
+    error = function(e) {
+      print(ggplot() + annotate("text", x=.5, y=.5, colour="grey50", size=3.5,
+        label=paste0("Regime stats error (", tk, "): ", conditionMessage(e))) + theme_void())
+    }
+  )
+
+  # ── Plot 4: 8-panel factsheet (optional — slow) ────────────────────────────
+  if (isTRUE(params$show_full_factsheet)) {
+    knitr::opts_chunk$set(fig.height = 22)
+    tryCatch({
+      fs_out <- suppressMessages(
+        fs_render(tk, bmk = params$bmk, ret_xts = xts_ret, rt = rt)
+      )
+      print(fs_out$combined)
+    }, error = function(e) {
+      print(ggplot() + annotate("text", x=.5, y=.5, colour="grey50", size=3.5,
+        label=paste0("Factsheet error (", tk, "): ", conditionMessage(e))) + theme_void())
+    })
+  }
+
+  cat("\n\n<div class='section-div'></div>\n\n")
+}
 ```
 
 ---

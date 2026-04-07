@@ -1,0 +1,595 @@
+---
+title: "Rebalancing Drift — SPY/IEF 60/40"
+subtitle: "A Pedagogical Guide to Volatility Harvesting, Drift, and Optimal Rebalancing Frequency"
+author: "ETF Intelligence Project"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    df_print: paged
+  pdf_document:
+    toc: true
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 14,
+  fig.height = 20
+)
+library(here)
+source(here("project_tree.R"))
+source(here("00_libraries.R"))
+source(here(project_tree$scripts$spy_dd_regime))   # defines build_regime_table()
+source(here(project_tree$scripts$wrangle))
+rt <- build_regime_table(xts_ret[, "SPY"])
+
+# Source the full analysis script — builds df, panels, fig_* objects.
+# Print guards (knitr.in.progress) suppress automatic output.
+source(here("scripts_daa_saa_taa/plot_rebal_drift.R"), local = knitr::knit_global())
+```
+
+---
+
+# 1  What Is Rebalancing Drift?
+
+A **60/40 portfolio** holds 60% SPY (US equity) and 40% IEF (US 7–10Y Treasury).
+Every portfolio management decision reduces to one question: *how often do you
+reset that ratio?*
+
+Three natural answers:
+
+| Strategy | Rule | Weight resets? |
+|---|---|---|
+| **Buy & Hold (BaH)** | Invest once, never touch | Never — weights drift freely |
+| **Annual Rebal** | Reset to 60/40 on 1 January each year | Once per year |
+| **Daily Rebal** | Reset to 60/40 at the end of every trading day | Every day |
+
+**Drift** is the daily return difference between a passive strategy and daily
+rebalancing:
+
+$$\text{Drift}_t = r_t^{\text{strategy}} - r_t^{\text{daily rebal}}$$
+
+Cumulative drift tells you whether *not* rebalancing daily has been a net win
+or loss over any horizon.
+
+---
+
+# 2  The Paradox: Why Does Daily Rebal Win Despite SPY's Outperformance?
+
+## 2.1  The Seeming Contradiction
+
+SPY compounded at roughly **10–11% per year** over the full history.
+IEF compounded at roughly **3–4%**.
+Buy & Hold lets the winning asset run — so BaH should accumulate more SPY
+exposure and therefore more wealth, right?
+
+**Wrong.** Daily rebalancing — which *sells SPY every day it rises* — beats
+Buy & Hold in total wealth over the full history.
+
+## 2.2  The Intuition: Volatility Harvesting
+
+SPY outperforms IEF in **trend** (direction).
+But SPY is also far more **volatile** (~15% annual vol vs ~6% for IEF).
+Daily rebalancing exploits that **volatility**, not the trend.
+
+> The rebalancing bonus is a *variance tax refund*: you sell the asset that
+> has become more expensive relative to its long-run value and buy the cheaper
+> one, collecting the spread between arithmetic and geometric returns.
+
+## 2.3  The Mathematics
+
+For any two-asset portfolio rebalanced continuously, the rebalancing bonus per
+period is approximately:
+
+$$\text{bonus} \approx \tfrac{1}{2} \times w_{\text{SPY}} \times w_{\text{IEF}}
+\times \sigma^2(\text{SPY} - \text{IEF})$$
+
+$$\approx \tfrac{1}{2} \times 0.60 \times 0.40 \times \text{var(daily spread)}$$
+
+**Key properties:**
+
+1. **Always positive** — as long as the two assets have any spread variance,
+   the bonus is strictly positive regardless of which asset wins long-term.
+2. **A free lunch from mean reversion** — relative prices mean-revert daily
+   even while trending overall.
+3. **Maximised at equal weights** — the product $w \times (1-w)$ peaks at 0.5.
+
+The flip side is the **volatility drag** formula (Itô's lemma for log returns):
+
+$$g \approx \mu - \tfrac{1}{2} \sigma^2$$
+
+where $g$ is the geometric (compound) return, $\mu$ is the arithmetic return,
+and $\sigma^2$ is variance.
+
+Buy & Hold allows portfolio variance to grow as SPY weight drifts to ~80%.
+Daily rebalancing keeps variance fixed at the target allocation level, so its
+geometric compounding is more efficient *even though* its arithmetic return is
+slightly lower.
+
+## 2.4  Why BaH Loses Despite Riding SPY's Trend
+
+| | Buy & Hold | Daily Rebal |
+|---|---|---|
+| Captures SPY trend | More | Less |
+| Portfolio volatility | Grows to ~80% equity | Fixed at 60% |
+| Volatility drag | Increasing over time | Stable |
+| Fall entry weight | ~80% SPY | 60% SPY |
+| **Net: geometric return** | **Lower** | **Higher** |
+
+**The rebalancing bonus from harvesting SPY/IEF spread volatility > the
+momentum cost of selling the winner.**
+
+## 2.5  The Regime Dimension
+
+It also matters *when* SPY outperforms.
+BaH is maximally overweight SPY entering every **Fall regime** — exactly the
+wrong time.
+Daily rebalancing systematically trimmed equity on every up-day before the Fall,
+so it always enters Falls at exactly 60%.
+
+That asymmetry — *trim on the way up, buy on the way down* — compresses
+drawdowns and lifts the geometric mean above BaH's.
+
+---
+
+# 3  What Drift Measures
+
+## 3.1  Definition
+
+$$\text{drift}_t = r_t^{\text{BaH}} - r_t^{\text{daily rebal}}$$
+
+Each day:
+
+- If drift > 0: carrying extra SPY exposure paid off (SPY beat IEF that day)
+- If drift < 0: carrying extra SPY exposure hurt (IEF beat SPY that day)
+
+Cumulative drift is the running total.
+
+## 3.2  The Paradox Resolved: Why Cumulative Drift Is Negative When SPY Weight Reaches 80%
+
+This is the key insight that trips most readers.
+
+**Panel M6** shows BaH SPY weight drifting to ~80% during bull runs.
+**Panel M5** shows cumulative drift staying negative.
+
+These are not contradictory — they measure different things:
+
+- **Panel M6** asks: *how much equity exposure has BaH accumulated?*
+  → SPY drifted from 60% → 80% because equities outperformed. BaH was holding
+  more equity — and was *richer* during the bull run.
+
+- **Panel M5** asks: *was carrying that extra equity exposure profitable vs
+  daily rebalancing?*
+  → Drift = `(w_bah − 0.60) × (spy_r − ief_r)` each day.
+  → During **Falls**, `w_bah − 0.60` is large and positive (~+20pp), but
+  `spy_r − ief_r` is large and **negative** (SPY collapses, IEF rallies).
+  → The product is a large negative spike.
+
+The bull-run gains from drift (positive, gradual) are overwhelmed by the Fall
+losses (negative, sudden, amplified by maximum overweight at the worst moment).
+
+**Net result:** the rebalancing bonus (daily rebal advantage) exceeds the
+momentum premium (BaH advantage) over the full history.
+
+---
+
+# 4  Overview: All Five Strategies
+
+```{r fig-main, fig.height=26}
+print(main_view)
+```
+
+**Reading the table (bottom strip):**
+
+- `Final $1` — terminal wealth from $1 invested
+- `Ann Ret` — compound annual growth rate
+- `Ann Vol` — annualised daily volatility
+- `Max DD` — peak-to-trough drawdown
+- `Sharpe` — Ann Ret ÷ Ann Vol (no risk-free rate)
+- `Calmar` — Ann Ret ÷ |Max DD| (return per unit of worst drawdown)
+
+Green = best in metric | Yellow = middle | Red = worst.
+
+---
+
+# 5  Pedagogical Breakdown (Acts 1–4)
+
+The appendix below traces the full causal chain across four acts.
+
+```{r fig-appendix, fig.height=26}
+print(appendix)
+```
+
+| Panel | Act | What it shows |
+|---|---|---|
+| A1 | Building blocks | SPY vs IEF individual returns |
+| A2 | Building blocks | BaH SPY weight drifts to ~80% |
+| A3 | Mechanism | Daily SPY − IEF spread — bad days cluster in Falls |
+| A4 | Mechanism | Daily drift = (excess weight) × spread — Fall spikes |
+| A5 | Consequence | Cumulative drift stays negative |
+| A6 | Consequence | Daily rebal wins in cumulative wealth |
+| A7 | When it happened | Annual drift cost: 2008 and 2022 the outliers |
+| A8 | When it happened | Rolling 12m drift turns negative at Fall onset |
+
+---
+
+# 6  Pairwise Comparisons: Each Strategy vs Buy & Hold
+
+Each figure below isolates one strategy against the Buy & Hold baseline.
+The drift panels (right column) now measure **strategy − BaH** rather than
+strategy − daily rebal.
+
+**Positive drift** = strategy beats BaH on that day.
+**Negative drift** = BaH beats strategy on that day.
+
+## 6.1  Daily Rebal vs Buy & Hold
+
+Daily rebalancing always enters Falls at exactly 60% equity — the minimum
+possible overweight relative to BaH.
+The SPY weight panel (D6) shows a **flat line** at 60%: the portfolio has no
+drift by construction.
+
+```{r fig-D, fig.height=26}
+print(fig_D)
+```
+
+## 6.2  Quarterly Rebal vs Buy & Hold
+
+Quarterly rebalancing resets four times per year — enough to prevent the most
+extreme equity overweight while still capturing several months of momentum.
+The SPY weight panel (Q6) shows a sawtooth pattern with amplitude roughly half
+of BaH's drift.
+
+```{r fig-Q, fig.height=26}
+print(fig_Q)
+```
+
+## 6.3  Annual Rebal vs Buy & Hold
+
+Annual rebalancing resets once per year on 1 January.
+If a Fall occurs late in the year the portfolio may have drifted significantly
+before the reset.
+The SPY weight panel (AR6) shows the characteristic sawtooth: drift builds
+through the year, snaps back at year-end.
+
+```{r fig-AR, fig.height=26}
+print(fig_AR)
+```
+
+## 6.4  Threshold Rebal ±10% vs Buy & Hold
+
+Threshold rebalancing is **event-driven**: rebalance only when SPY weight
+drifts outside [50%, 70%].
+Unlike calendar strategies, it rebalances more during volatile periods (when
+the bonus is largest) and less during calm trends (letting momentum run).
+This is implicitly **regime-aware** without knowing the regime.
+
+```{r fig-TR10, fig.height=26}
+print(fig_TR10)
+```
+
+## 6.5  Threshold Rebal ±5% vs Buy & Hold
+
+A tighter ±5% band [55%, 65%] triggers rebalancing more frequently.
+It is closer to daily rebalancing in behaviour during volatile periods and
+still captures some momentum during calm trends.
+Compare TR5 and TR10 SPY weight panels to see how the band width controls
+the degree of drift allowed.
+
+```{r fig-TR5, fig.height=26}
+print(fig_TR5)
+```
+
+---
+
+# 7  Optimal Rebalancing Frequency
+
+There is no single optimal frequency — it depends on three competing forces:
+
+| Force | Direction | Explanation |
+|---|---|---|
+| Volatility harvesting | ↑ Higher frequency | More rebalancing = more bonus harvested |
+| Momentum capture | ↓ Lower frequency | Selling the winner before it finishes rising has a cost |
+| Transaction costs | ↓ Lower frequency | Bid-ask spread × number of trades |
+
+**Theoretical sweet spot:**
+
+$$\text{optimal frequency} \propto \frac{\sigma^2_{\text{spread}}}{\text{cost per trade}}$$
+
+For low-cost ETFs (SPY, IEF), transaction costs are near zero today, shifting
+the optimum toward higher frequency.
+Empirically, **monthly to quarterly** rebalancing captures ~80–90% of the daily
+bonus at ~1/20th of the trading activity.
+
+**Threshold strategies are superior to calendar strategies** because they
+rebalance *when the bonus is largest* (volatile periods = wide spread variance)
+rather than on a fixed calendar regardless of market conditions.
+They are effectively a **free regime signal**: the threshold fires exactly when
+equity has been running hot (before a potential Fall) or has fallen hard
+(Recovery buying opportunity).
+
+---
+
+# 8  Key Findings
+
+1. **Daily rebalancing outperforms Buy & Hold in total wealth** over the full
+   SPY/IEF history — not because it captures more trend, but because it
+   harvests the spread variance via sell-high/buy-low every day.
+
+2. **Drift = (excess SPY weight) × (SPY − IEF spread).** It is negative in
+   aggregate because Fall-regime spikes (large overweight × large negative
+   spread) outweigh bull-run gains (moderate overweight × moderate positive
+   spread).
+
+3. **The rebalancing bonus formula** $\approx \tfrac{1}{2} w(1-w)\sigma^2$
+   is always positive, always a free lunch from variance, and always maximised
+   at equal weights.
+
+4. **BaH enters every Fall maximally overweight equity** (~80% vs 60% target)
+   — the worst possible entry for a drawdown. Daily rebalancing always enters
+   Falls at exactly the target.
+
+5. **Threshold rebalancing dominates calendar rebalancing**: same volatility
+   harvesting benefit, less unnecessary trading in calm markets, implicit
+   regime timing.
+
+6. **Optimal real-world frequency** for low-cost ETFs: monthly or quarterly
+   calendar, or ±5% threshold — each captures most of the daily bonus.
+
+---
+
+# 9  `rebal_profile` — Choosing Rebalancing Frequency for Any Pair
+
+The preceding sections studied five specific strategies for SPY/IEF 60/40.
+`rebal_profile()` generalises that analysis to **any two-ticker portfolio**:
+given a pair and target weights, it runs all three calendar-rebalancing
+frequencies (Quarterly / Semi-Annual / Annual) plus the Buy & Hold baseline
+and returns a full **12-metric characteristic vector** for each strategy.
+
+**File:** `scripts_daa_saa_taa/rebal_profile.R`
+
+**Three exported functions:**
+
+| Function | Purpose |
+|---|---|
+| `rebal_profile(ticker1, ticker2, w1, ...)` | Runs the four strategies, returns 4 × 12 tibble |
+| `print_rebal_profile(x)` | Formatted console table with ★ best-in-column marker |
+| `best_rebal_freq(x, by)` | Returns the strategy name that wins on a named metric |
+
+---
+
+## 9.1  `rebal_profile()` — full signature
+
+```r
+source(here("scripts_daa_saa_taa/rebal_profile.R"))
+
+rebal_profile(
+  ticker1,                                       # character — must be in xts_ret
+  ticker2,                                       # character — must be in xts_ret
+  w1,                                            # numeric — target weight for ticker1
+  w2      = 1 - w1,                              # numeric — complement (default)
+  xts_ret = get("xts_ret", envir=parent.frame()) # xts of daily log returns
+                                                 # auto-resolved from calling env
+  rf      = 0                                    # annual risk-free rate (decimal)
+)                                                # e.g. rf = 0.04 for 4% p.a.
+```
+
+**Returns:** a `tibble` with 4 rows (Quarterly / Semi-Annual / Annual / Buy & Hold)
+and 12 metric columns, plus 6 attributes:
+
+| Attribute | Content |
+|---|---|
+| `pair` | `"SPY/IEF"` |
+| `weights` | `"60/40"` |
+| `n_days` | number of overlapping trading days |
+| `from` | first date in common history |
+| `to` | last date in common history |
+| `rf` | annual risk-free rate used |
+
+### How it works internally
+
+**Period boundary detection** uses integer keys — no string comparisons, no
+`lubridate` dependency:
+
+```r
+yr  <- as.integer(format(dates, "%Y"))
+mo  <- as.integer(format(dates, "%m"))
+qtr <- yr * 4L + (mo - 1L) %/% 3L   # changes value at each quarter boundary
+sem <- yr * 2L + (mo - 1L) %/% 6L   # changes value at each semi-annual boundary
+```
+
+A rebalance fires on day `i` when `qtr[i] != qtr[i-1]` (or `sem`, `yr` for the
+other frequencies).  Buy & Hold never fires (`do_rebal = FALSE` always).
+
+**Rebalancing mechanics** are identical to `plot_rebal_drift.R`:
+each day the two weight buckets grow with their asset's gross return;
+on a rebalancing day the combined total is redistributed to `w1` / `w2`.
+
+---
+
+## 9.2  The 12 metrics — formulas and interpretation
+
+The metrics are grouped into four natural families:
+
+### Return metrics
+
+| Metric | Formula | What it tells you |
+|---|---|---|
+| `Final $1` | $\prod(1+r_t)$ — terminal value of \$1 | Absolute wealth creation |
+| `Ann Ret` | $(V_T / V_0)^{252/T} - 1$ — CAGR | Compound annual growth rate; log-scale equivalent of wealth |
+
+### Risk metrics
+
+| Metric | Formula | What it tells you |
+|---|---|---|
+| `Ann Vol` | $\hat{\sigma}_{\text{daily}} \times \sqrt{252}$ | Total volatility — penalises both upside and downside swings |
+| `Max DD` | $\min_t \left(\frac{V_t - \max_{s \le t} V_s}{\max_{s \le t} V_s}\right)$ | Worst peak-to-trough loss; the single number most relevant to investor psychology |
+
+### Risk-adjusted return metrics
+
+| Metric | Formula | Notes |
+|---|---|---|
+| `Sharpe` | $\frac{\text{Ann Ret} - r_f}{\text{Ann Vol}}$ | Standard; penalises all variance equally |
+| `Sortino` | $\frac{\text{Ann Ret} - r_f}{\sigma_{\text{down}}}$ | Downside semi-deviation only: $\sigma_{\text{down}} = \sqrt{\text{mean}((r_t - r_{f,d})^2 \;\text{for}\; r_t < r_{f,d})} \times \sqrt{252}$. Better for non-normal return distributions — rebalancing strategies tend to be right-skewed |
+| `Calmar` | $\frac{\text{Ann Ret}}{|\text{Max DD}|}$ | Return per unit of worst historical loss; most relevant to drawdown-sensitive mandates |
+| `Omega` | $\frac{\sum \max(r_t - r_{f,d},\, 0)}{\sum \max(r_{f,d} - r_t,\, 0)}$ | Full distribution ratio (Keating & Shadwick). Values >1 mean gains outweigh losses relative to threshold. No distributional assumption |
+
+### Tail risk metrics
+
+| Metric | Formula | What it tells you |
+|---|---|---|
+| `VaR 5%` | $Q_{0.05}(r_t)$ — 5th percentile daily return | The daily loss threshold exceeded only 5% of days |
+| `CVaR 5%` | $E[r_t \mid r_t \le \text{VaR 5\%}]$ — expected shortfall | Average loss on the worst 5% of days; more sensitive than VaR to extreme tail events |
+
+### Trading-cost metrics
+
+| Metric | Formula | What it tells you |
+|---|---|---|
+| `Rebal N` | Count of calendar rebalancing events | Direct measure of trading frequency and therefore transaction cost exposure |
+| `Avg Slip` | $\text{mean}(|r_{i-1}|)$ for all rebalancing days $i$ | Mean absolute return on the day *before* each rebalance — the last day of unchecked drift. High values indicate the portfolio arrives at rebalancing day with a large position bias, implying higher market-impact risk on execution |
+
+> **Note on `rf`:** Setting `rf > 0` shifts the Sharpe, Sortino, and Omega
+> thresholds simultaneously. For comparison across pairs, use a consistent `rf`
+> (e.g. current T-bill rate). The default `rf = 0` treats excess return over
+> cash as the entire return.
+
+---
+
+## 9.3  `print_rebal_profile()` — formatted output
+
+```r
+print_rebal_profile(x, digits = 1)
+```
+
+- `x` — the tibble returned by `rebal_profile()`
+- `digits` — decimal places for percentage columns (default 1)
+
+**Output format:**
+
+```
+══════════════════════════════════════════════════════════════════════════════════
+  Pair: SPY/IEF  |  Weights: 60/40  |  2003-04-07 → 2025-12-31  (5724 days)
+══════════════════════════════════════════════════════════════════════════════════
+
+   Strategy Final $1 Ann Ret Ann Vol  Max DD Sharpe Sortino Calmar  Omega VaR 5% CVaR 5% Rebal N Avg Slip Best
+  Quarterly    $9.47   7.5%    9.3% -22.7%   0.81    1.17  0.331  1.617  -0.9%   -1.3%      88  0.551% ★★★★
+Semi-Annual    $9.23   7.4%    9.4% -22.9%   0.78    1.13  0.322  1.598  -0.9%   -1.3%      44  0.551%  ★★
+     Annual    $9.05   7.3%    9.5% -23.5%   0.76    1.10  0.311  1.576  -0.9%   -1.3%      22  0.552%
+ Buy & Hold    $8.71   7.1%   10.1% -26.0%   0.70    1.02  0.274  1.531  -1.0%   -1.4%       0       0
+
+  ★ = best among rebalanced strategies (excludes Buy & Hold)
+══════════════════════════════════════════════════════════════════════════════════
+```
+
+The `Best` column concatenates one ★ per metric where that row wins among the
+three rebalanced strategies.  Buy & Hold is always excluded from the ranking —
+it is the *baseline*, not a rebalancing choice.
+
+**Formatting rules applied:**
+- `Ann Ret`, `Ann Vol`, `Max DD`, `VaR 5%`, `CVaR 5%` → shown as `%` (×100)
+- `Avg Slip` → shown as `%` with 3 decimal places
+- `Final $1` → shown as `$X.XX`
+- Sharpe, Sortino, Calmar, Omega → 2 decimal places
+
+---
+
+## 9.4  `best_rebal_freq()` — single-criterion selector
+
+```r
+best_rebal_freq(x, by = "Sharpe")
+```
+
+Returns (invisibly) the strategy name that wins on `by`, and prints a one-line
+summary.  Buy & Hold is always excluded.
+
+**Higher-is-better metrics** (maximised): `Final $1`, `Ann Ret`, `Sharpe`,
+`Sortino`, `Calmar`, `Omega`.
+
+**Lower-is-better metrics** (minimised): `Ann Vol`, `Max DD`, `VaR 5%`,
+`CVaR 5%`, `Rebal N`, `Avg Slip`.
+
+```r
+best_rebal_freq(p, by = "Sharpe")
+#> Best rebalancing frequency by Sharpe: Quarterly  (Sharpe = 0.807)
+
+best_rebal_freq(p, by = "Max DD")
+#> Best rebalancing frequency by Max DD: Quarterly  (Max DD = -22.7%)
+
+best_rebal_freq(p, by = "Rebal N")
+#> Best rebalancing frequency by Rebal N: Annual  (Rebal N = 22)
+```
+
+---
+
+## 9.5  Live examples
+
+### SPY / IEF 60/40 — the canonical case
+
+```{r rebal-profile-spy-ief}
+source(here("scripts_daa_saa_taa/rebal_profile.R"))
+p_6040 <- rebal_profile("SPY", "IEF", w1 = 0.60)
+print_rebal_profile(p_6040)
+best_rebal_freq(p_6040, by = "Sharpe")
+best_rebal_freq(p_6040, by = "Max DD")
+best_rebal_freq(p_6040, by = "Calmar")
+```
+
+**Quarterly** typically sweeps the risk-adjusted metrics because it rebalances
+often enough to harvest the majority of the variance bonus while still allowing
+~3 months of momentum to run.
+
+### QQQ / AGG 65/35 — higher-volatility growth pair
+
+```{r rebal-profile-qqq-agg}
+p_qqq <- rebal_profile("QQQ", "AGG", w1 = 0.65)
+print_rebal_profile(p_qqq)
+best_rebal_freq(p_qqq, by = "Sharpe")
+```
+
+Higher QQQ volatility widens $\sigma^2(\text{spread})$ and amplifies the
+rebalancing bonus.  The momentum effect of letting QQQ run is also stronger,
+so the optimal frequency may shift toward Semi-Annual — the bonus from frequent
+rebalancing competes more evenly against the cost of cutting winners early.
+
+### With a non-zero risk-free rate
+
+```r
+p_rf <- rebal_profile("SPY", "IEF", w1 = 0.60, rf = 0.04)
+print_rebal_profile(p_rf)
+```
+
+Setting `rf = 0.04` (4% p.a.) rescales Sharpe, Sortino, and Omega relative to
+a cash hurdle.  Relative rankings between strategies are usually stable, but
+absolute Sharpe values will be lower and Omega will be closer to 1.
+
+---
+
+## 9.6  Decision guide
+
+| Primary objective | Look at | Prefer |
+|---|---|---|
+| Maximise long-run wealth | `Final $1`, `Ann Ret` | Higher frequency (Quarterly) |
+| Maximise risk-adjusted return | `Sharpe`, `Sortino`, `Calmar` | ★ winner |
+| Minimise worst drawdown | `Max DD` | ★ winner on Max DD |
+| Minimise tail loss severity | `CVaR 5%` | ★ winner on CVaR 5% |
+| Minimise trading activity | `Rebal N` | Annual (fewest resets) |
+| Minimise market-impact exposure | `Avg Slip` | Lowest slip strategy |
+
+> **Rule of thumb for low-cost ETFs:** Quarterly rebalancing captures ~85% of
+> the daily-rebalancing bonus at ~1/20th of the trading activity and rarely
+> loses to Annual on any risk-adjusted metric.  Semi-Annual is the pragmatic
+> middle ground for higher-volatility pairs where momentum is a stronger force.
+
+---
+
+*Source: `scripts_daa_saa_taa/plot_rebal_drift.R` — SPY/IEF 60/40 universe.*
+*Regime shading via `build_regime_table()` with T_FALL = 10%.*
+*All returns are total-return log returns; no transaction costs assumed.*

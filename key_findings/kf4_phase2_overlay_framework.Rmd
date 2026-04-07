@@ -1,0 +1,512 @@
+---
+title: "KF4 — Phase 2 Overlay Framework"
+subtitle: "Stabilizer + Enhancer overlays on 6040Classic: design decisions, taxonomy, and methodology"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+---
+
+<style>
+h2 { border-bottom: 3px solid #1d3461; padding-bottom: 6px; margin-top: 40px; }
+h3 { color: #1d3461; border-left: 4px solid #3b82f6; padding-left: 10px; margin-top: 24px; }
+h4 { color: #374151; margin-top: 16px; }
+
+.finding-box {
+  background: #fffbeb; border-left: 5px solid #f59e0b;
+  padding: 12px 18px; margin: 14px 0;
+  border-radius: 0 4px 4px 0;
+}
+.conclusion-box {
+  background: #f0fdf4; border-left: 5px solid #16a34a;
+  padding: 12px 18px; margin: 14px 0;
+  border-radius: 0 4px 4px 0;
+}
+.warn-box {
+  background: #fef2f2; border-left: 5px solid #dc2626;
+  padding: 12px 18px; margin: 14px 0;
+  border-radius: 0 4px 4px 0;
+}
+.phase-box {
+  background: #eff6ff; border-left: 5px solid #1d4ed8;
+  padding: 12px 18px; margin: 14px 0;
+  border-radius: 0 4px 4px 0;
+}
+.stab-box {
+  background: #f0fdf4; border-left: 5px solid #15803d;
+  padding: 12px 18px; margin: 14px 0;
+  border-radius: 0 4px 4px 0;
+}
+.enh-box {
+  background: #eff6ff; border-left: 5px solid #1d4ed8;
+  padding: 12px 18px; margin: 14px 0;
+  border-radius: 0 4px 4px 0;
+}
+.fn-box {
+  background: #f8f9fa; border-left: 4px solid #6b7280;
+  padding: 8px 14px; margin: 8px 0 14px 0;
+  font-family: monospace; font-size: 13px;
+  border-radius: 0 4px 4px 0;
+}
+.type-a { background:#ede9fe; border-left:4px solid #7c3aed; padding:6px 14px; margin:5px 0; border-radius:0 3px 3px 0; }
+.type-b { background:#fef9c3; border-left:4px solid #ca8a04; padding:6px 14px; margin:5px 0; border-radius:0 3px 3px 0; }
+.type-c { background:#dcfce7; border-left:4px solid #16a34a; padding:6px 14px; margin:5px 0; border-radius:0 3px 3px 0; }
+.hedge-full  { background:#dbeafe; border-left:4px solid #1d4ed8; padding:6px 14px; margin:5px 0; border-radius:0 3px 3px 0; }
+.hedge-part  { background:#fef9c3; border-left:4px solid #ca8a04; padding:6px 14px; margin:5px 0; border-radius:0 3px 3px 0; }
+.hedge-cond  { background:#fce7f3; border-left:4px solid #db2777; padding:6px 14px; margin:5px 0; border-radius:0 3px 3px 0; }
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 5
+)
+library(tidyverse)
+library(xts)
+library(patchwork)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(here)
+
+if (!exists("project_tree"))       source(here("project_tree.R"))
+if (!exists("etf_metadata"))       source(here(project_tree$scripts$init))
+if (!exists("xts_ret"))            source(here(project_tree$scripts$wrangle))
+if (!exists("build_regime_table")) source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+if (!exists("rt") || !is.data.frame(rt))
+  rt <- build_regime_table(xts_ret[, "SPY"])
+if (!exists(".build_baseline"))    source(here("scripts_daa_saa_taa/08_enhancer_screen.R"))
+
+baseline_xts <- .build_baseline(xts_ret)
+.ann_ret <- function(r) { r <- as.numeric(r[!is.na(r)]); prod(1+r)^(252/length(r))-1 }
+.max_dd  <- function(r) { w <- cumprod(1+as.numeric(r[!is.na(r)])); min((w-cummax(w))/cummax(w)) }
+.ann_vol <- function(r) sd(as.numeric(r), na.rm=TRUE) * sqrt(252)
+.ir      <- function(r) { v <- .ann_vol(r); if(v==0) NA_real_ else .ann_ret(r)/v }
+
+bl_ret <- .ann_ret(baseline_xts)
+bl_dd  <- .max_dd(baseline_xts)
+bl_vol <- .ann_vol(baseline_xts)
+bl_ir  <- .ir(baseline_xts)
+```
+
+---
+
+## 1. Strategic Context
+
+### The core problem
+
+The project starts from a confirmed empirical finding (KF6):
+
+<div class="warn-box">
+**KF6 — Regime-rotation TAA does NOT beat passive 60/40**
+Walk-forward DAA produced ~6.7% vs passive ~7.6% over full history.
+Root causes: (1) international diversification drag during US-dominated decade,
+(2) regime detection lag — Fall fires only after 10% drawdown already absorbed,
+(3) tilts too small to overcome base drag.
+
+**Implication:** Do not attempt to improve return via regime rotation.
+The right objective is **drawdown reduction at minimum return sacrifice.**
+</div>
+
+This finding locks the project objective:
+
+> *"Given we accept SPY/IEF 60/40 return, what is the minimum-cost overlay that reduces MaxDD from ~`r sprintf("%.0f%%", abs(bl_dd)*100)` to ~15%?"*
+
+### Phase architecture
+
+The framework is split into three phases with clean separation of concerns:
+
+```{r phase-table}
+tibble(
+  Phase   = c("1.0", "2.1", "2.2"),
+  Name    = c("SAA Baseline", "Stabilizer Overlay", "Enhancer Overlay"),
+  File    = c("01_saa_baseline.R", "05_dd_stabilizer.R", "08_enhancer_screen.R"),
+  Objective = c(
+    "Define the fixed benchmark — 6040Classic",
+    "Reduce MaxDD with minimum return sacrifice",
+    "Add alpha above baseline without harming MaxDD"
+  ),
+  Trigger = c("None — structural", "Fall correlation + hedge type", "Regime + 200DMA + IR signal")
+) %>%
+  kable(align = "llllll") %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"), font_size = 12) %>%
+  row_spec(1, background = "#f1f5f9", bold = TRUE) %>%
+  row_spec(2, background = "#f0fdf4") %>%
+  row_spec(3, background = "#eff6ff")
+```
+
+---
+
+## 2. Phase 1.0 — Baseline: 6040Classic
+
+<div class="phase-box">
+**6040Classic = 60% SPY + 40% IEF, buy-and-hold, no rebalancing signal.**
+
+This is the benchmark all Phase 2 overlays must beat or at minimum not harm.
+Built via `.build_baseline(xts_ret, W_EQ=0.60, W_FI=0.40)`.
+</div>
+
+```{r baseline-stats}
+tibble(
+  Metric = c("Composition", "Annualised Return", "MaxDD", "Ann Vol", "IR"),
+  Value  = c(
+    "60% SPY + 40% IEF",
+    sprintf("%+.1f%%", bl_ret * 100),
+    sprintf("%.1f%%",  bl_dd  * 100),
+    sprintf("%.1f%%",  bl_vol * 100),
+    sprintf("%.2f",    bl_ir)
+  )
+) %>%
+  kable(align = "lr") %>%
+  kable_styling(bootstrap_options = "condensed", full_width = FALSE, font_size = 12)
+```
+
+### Why SPY/IEF specifically
+
+- **KF5 (international drag):** International diversification consistently underperformed during the US-dominated post-2010 decade. The optimizer would converge on SPY/IEF anyway.
+- **KF1 (anti-diversification):** Low-ρ tickers do NOT reduce MaxDD — they often worsen it. The right hedge is a ticker with its own shallow DD, not simply low correlation.
+- **Grounding by evidence:** Rather than leaving the baseline to judgement, KF5 + KF1 together justify SPY/IEF explicitly.
+
+### Design decision: no rebalancing
+
+The baseline is strict buy-and-hold. This is intentional:
+
+- Rebalancing introduces a timing decision that complicates attribution
+- All Phase 2 overlays are layered on top — the baseline drift is part of the "cost of doing nothing"
+- Keeps the benchmark clean and reproducible
+
+---
+
+## 3. Phase 2.1 — Stabilizer Overlay
+
+<div class="stab-box">
+**Objective:** Find instruments that, when held at a small overlay weight w,
+reduce the MaxDD of 6040Classic with minimum annualised return sacrifice.
+
+**Formula:** `(1 − w) × 6040Classic + w × TICKER`
+
+**Primary screen metric:** `dd_reduction = MaxDD(baseline) − MaxDD(blended at w=10%)`
+**Efficiency metric:** `insurance_ratio = dd_reduction / max(return_drag, 0.001)`
+</div>
+
+### Hedge type taxonomy
+
+The Fall correlation with the baseline is the primary classifier:
+
+<div class="hedge-full">**FULL** — `fall_corr ≤ −0.10`
+Negatively correlated with 6040Classic during Fall episodes. These instruments *appreciate*
+(or fall much less) precisely when SPY is in freefall. True crisis hedges.
+Examples: GLD, long-duration government bonds (TLT), managed futures.
+</div>
+
+<div class="hedge-part">**PARTIAL** — `−0.10 < fall_corr ≤ 0.30`
+Uncorrelated to weakly positive in Fall. They reduce MaxDD through portfolio diversification
+math rather than active crisis protection. They do not amplify drawdowns but do not offset them.
+Examples: trend-following, broad commodities, low-vol equity.
+</div>
+
+<div class="hedge-cond">**CONDITIONAL** — `fall_corr > 0.30`
+Positive Fall correlation — they move with SPY in a crisis. They may still reduce MaxDD at
+the portfolio level through dilution (lower own-MaxDD), but offer no genuine crisis hedge.
+Use with caution; return drag likely not compensated by protection in extreme events.
+</div>
+
+### Three-stage pipeline
+
+```{r stab-pipeline}
+tibble(
+  Stage = c("Stage 1", "Stage 2", "Stage 3"),
+  Function = c("build_stabilizer_candidates()", "score_stabilizer_context()", "select_stabilizers()"),
+  Cadence  = c("Quarterly", "Monthly", "Monthly"),
+  Purpose  = c(
+    "Screen all tickers: dd_reduction > 0 at w=10%. Assign hedge type (FULL/PARTIAL/CONDITIONAL).",
+    "Score each candidate on 4 current signals → stabilizer_score 0–100.",
+    "Greedy top-N selection with pairwise ρ ≤ 0.80 guard."
+  )
+) %>%
+  kable(align = "lllll") %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"), font_size = 12)
+```
+
+### Stage 2 signals — stabilizer context score
+
+| ID | Signal | Direction | Rationale |
+|---|---|---|---|
+| s1 | Rolling 63d correlation vs baseline | **Lower = better** (inverted) | Is the ticker decorrelating from baseline RIGHT NOW? |
+| s2 | Historical Fall DD reduction at 10% | **Higher = better** | Does it consistently protect in crises? |
+| s3 | Own 200DMA trend signal | **Higher = better** | Is the ticker trending — likely to continue its protective role? |
+| s4 | Own 63d annualised return | **Higher = better** | Is the stabilizer currently "working" (appreciating as hedge)? |
+
+<div class="finding-box">
+**Design note:** s1 is inverted before ranking — a stabilizer with *lower* rolling correlation right now is more valuable, not less. This is the opposite of an enhancer where higher rolling IR is better.
+</div>
+
+### Key analytical insight — stabilizer
+
+<div class="conclusion-box">
+**The KF1 anti-diversification finding directly informs stabilizer design.**
+MaxDD of the blended portfolio is NOT minimised by minimising correlation.
+It is minimised by finding tickers with (a) low own-MaxDD AND (b) negative Fall correlation.
+A ticker with fall_corr = −0.6 and own_maxdd = −15% beats fall_corr = 0.0 and own_maxdd = −45%.
+`insurance_ratio` captures this: it rewards DD reduction per unit of return drag, not raw correlation.
+</div>
+
+---
+
+## 4. Phase 2.2 — Enhancer Overlay
+
+<div class="enh-box">
+**Objective:** Find instruments that, at overlay weight w, generate alpha *above*
+the 6040Classic baseline — improving the risk-adjusted return profile.
+
+**Formula:** `(1 − w) × 6040Classic + w × TICKER`
+
+**Primary screen metric:** `full_ir = IR of spread (ticker − baseline)` over full history
+**Admission logic:** OR-gate — pass if `full_ir > 0.20` OR `fall_excess > 0` OR `recov_excess > 0`
+</div>
+
+### Trigger type taxonomy
+
+All spreads, IRs, and excess returns are computed versus **6040Classic** — not raw SPY.
+
+<div class="type-a">**Type A — Unconditional**
+`fall_excess ≥ −2pp vs baseline` → hold TICKER at fixed weight always.
+No signal, no switching. Suitable for tickers with persistent IR advantage in all regimes.
+Risk: no fall protection — the ticker is blended even during SPY crashes.
+Examples: QQQ (historically), USMV.
+</div>
+
+<div class="type-b">**Type B — SPY Regime-conditional**
+`fall_excess < −2pp vs baseline` → hold only in Recovery + Consolidation; revert to baseline in Fall.
+Trigger: `build_regime_table()` → daily regime label via SPY drawdown.
+Risk: **regime detection lag** — Fall fires only after ~10% drop already absorbed.
+Examples: SMH, XLK (ALPHA in good regimes, LOSS in Fall).
+</div>
+
+<div class="type-c">**Type C — 200DMA signal-conditional**
+Type B ticker with `trend_signals` data available → use 200DMA filter instead of hard regime switch.
+Trigger: ticker price above its own 200DMA → blend ON; below → revert to baseline.
+Risk: whipsaw cost in choppy markets (quantified in `06_trend_quality.R`).
+Advantage over B: smoother entry/exit, fires earlier than regime detection lag.
+</div>
+
+**Threshold:** `FALL_TOLERANCE = −0.02` — the A/B boundary. Tickers losing more than 2pp vs baseline in Fall are classified B.
+
+### Three-stage pipeline
+
+```{r enh-pipeline}
+tibble(
+  Stage = c("Stage 1", "Stage 2", "Stage 3"),
+  Function = c("build_enhancer_candidates()", "score_current_context()", "select_enhancers()"),
+  Cadence  = c("Quarterly", "Monthly", "Monthly"),
+  Purpose  = c(
+    "OR-screen: admit if full_ir > floor OR fall/recov excess > 0. Assign trigger_type A/B.",
+    "Score on 4 current signals → context_score 0–100. Refine B → C when trend_signals available.",
+    "Greedy top-N selection with pairwise ρ guard (default ρ_max = 1.0, uncapped)."
+  )
+) %>%
+  kable(align = "lllll") %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"), font_size = 12)
+```
+
+### Stage 2 signals — Context Score v1
+
+| ID | Signal | Direction | Rationale |
+|---|---|---|---|
+| s1 | Rolling IR 63d of spread vs baseline | Higher = better | Is alpha present in the last quarter? |
+| s2 | Historical excess return in current SPY regime | Higher = better | Does the ticker historically outperform in today's regime? |
+| s3 | Own 200DMA trend signal (1/0) | Higher = better | Is the ticker trending — alpha likely to continue? |
+| s4 | Spread momentum (20d mean > 63d mean) | Higher = better | Is alpha accelerating or fading? |
+
+<div class="finding-box">
+**This is Context Score Version 1.** The label "v1" is intentional — future versions may use different signals, windows, or non-linear combinations. Always label results with the version to keep comparisons unambiguous.
+</div>
+
+### Key analytical insight — enhancer
+
+<div class="conclusion-box">
+**Unconditional vs Conditionality — the central strategic theme.**
+
+The 9-panel ticker fingerprint (especially Panel 3: Rolling L/S and Panel 6: Rolling IR) reveals
+whether alpha is **stable across time** (Type A candidate) or **concentrated in specific regimes**
+(Type B/C candidate).
+
+- **Type A:** Rolling IR stays positive across all regimes. Example: QQQ in a rising-rate Consolidation.
+- **Type B:** Rolling IR collapses or inverts during Fall. Example: SMH in 2022 — deep LOSS phase.
+- **Type C:** Rolling IR tracks the 200DMA signal closely. The trend filter captures the same regime
+  shift as Type B but fires earlier and exits cleaner.
+
+A ticker that looks Type A in full-history stats may reveal Type B behaviour in the rolling panels.
+**Always examine the rolling panels before assigning trigger type.**
+</div>
+
+---
+
+## 5. Overlay Backtest Methodology
+
+Once the screen has identified *which* tickers to use, the overlay backtest (`09_overlay_backtest.R`)
+answers *how* each ticker should be held.
+
+### Three return series per ticker
+
+For each ticker at overlay weight w:
+
+| Type | Return formula | Signal |
+|---|---|---|
+| A | `(1−w) × baseline + w × ticker` always | None |
+| B | Blend in Recovery+Consolidation; `baseline` in Fall | `build_regime_table()` |
+| C | Blend when ticker above 200DMA; `baseline` otherwise | `price ≥ MA(200)` |
+
+### Recommendation criterion
+
+| Role | Criterion | Rationale |
+|---|---|---|
+| Enhancer | Highest IR | Maximise risk-adjusted alpha above baseline |
+| Stabilizer | Lowest MaxDD | Maximise drawdown protection |
+
+### Optimal combination
+
+`build_optimal_overlay()` picks the best type per ticker and assembles an equal-weight
+combined portfolio, allowing direct comparison of the "smart" implementation vs pure baseline.
+
+### Known limitations
+
+<div class="warn-box">
+1. **Type B lag risk:** The Fall regime fires after ~10% SPY drawdown is already absorbed.
+   The switch-off is backward-looking. Type C partially mitigates this by using price momentum.
+
+2. **Type C whipsaw:** In choppy markets (e.g. 2015–2016 range-bound SPY), the 200DMA
+   trigger generates false exits and re-entries. Quantified in `06_trend_quality.R`.
+
+3. **Look-ahead in screening:** The 3-stage screen uses full-history stats to identify candidates.
+   Walk-forward validation is not yet implemented. Treat results as ex-post evidence,
+   not as a live trading signal.
+
+4. **Equal-weight combination:** The optimal portfolio uses equal weight across selected tickers.
+   An optimised weight vector (e.g. minimum-variance or IR-weighted) is not yet implemented.
+</div>
+
+---
+
+## 6. Summary of Analytical Conclusions
+
+```{r conclusions}
+tibble(
+  `#`  = 1:7,
+  Conclusion = c(
+    "Regime-rotation TAA does not beat passive 60/40 (KF6). DD reduction — not return enhancement — is the right Phase 2 objective.",
+    "The 6040Classic baseline (60% SPY + 40% IEF) is justified empirically by KF1 (anti-diversification) and KF5 (international drag). No further optimisation needed at Phase 1.",
+    "Stabilizer hedge type is determined by Fall correlation: FULL (ρ ≤ −0.10) provides true crisis protection; PARTIAL and CONDITIONAL rely on portfolio math only.",
+    "Enhancer trigger type is determined by Fall excess return vs baseline: Type A tickers are structurally robust; Type B/C tickers require switching to avoid Fall losses.",
+    "The 200DMA signal (Type C) is generally superior to the hard regime switch (Type B): it fires earlier, exits cleaner, and avoids regime-detection lag at the cost of whipsaw in choppy markets.",
+    "Context Score v1 (4-signal rank-sum) captures the CURRENT opportunity in each enhancer candidate. It must be re-run monthly; the quarterly candidate list is stable but the score is not.",
+    "Rolling panels in the ticker fingerprint (Rolling L/S, Rolling IR) are the primary diagnostic for Type A vs B/C classification — full-history stats alone can mask regime-concentrated alpha."
+  )
+) %>%
+  kable(align = "rl") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) %>%
+  column_spec(1, bold = TRUE, width = "2em") %>%
+  column_spec(2, width = "90%")
+```
+
+---
+
+## 7. File Map
+
+```{r file-map}
+tibble(
+  File = c(
+    "scripts_daa_saa_taa/01_saa_baseline.R",
+    "scripts_daa_saa_taa/05_dd_stabilizer.R",
+    "scripts_daa_saa_taa/08_enhancer_screen.R",
+    "scripts_daa_saa_taa/09_overlay_backtest.R",
+    "scripts_daa_saa_taa/overlay_backtest_report.Rmd",
+    "Rmd/stabilizer_screen_report.Rmd",
+    "Rmd/enhancer_screen_report.Rmd",
+    "utility/plot_xts_pair.R"
+  ),
+  Purpose = c(
+    "Phase 1.0 — 6040Classic baseline definition",
+    "Phase 2.1 — Stabilizer pipeline: candidates → scores → selection",
+    "Phase 2.2 — Enhancer pipeline: candidates → scores → selection",
+    "Type A/B/C backtest for any ticker set; exec summary + recommendations",
+    "Self-contained HTML report: enhancer or stabilizer role, exec summary",
+    "Parameterised stabilizer screen report",
+    "Parameterised enhancer screen report",
+    "9-panel ticker fingerprint (plot_xts_pair); role header box; extended flag"
+  ),
+  `Key function` = c(
+    ".build_baseline()",
+    "find_stabilizers()",
+    "find_enhancers()",
+    "run_overlay_backtest()",
+    "params: role / tickers / overlay_w",
+    "params: screen_weight / roll_win / n_select",
+    "params: ir_floor / fall_tolerance / n_select",
+    "plot_xts_pair(..., role=, extended=)"
+  )
+) %>%
+  kable(align = "lll") %>%
+  kable_styling(bootstrap_options = c("hover", "condensed"), font_size = 11) %>%
+  column_spec(1, monospace = TRUE, color = "#1d3461") %>%
+  column_spec(3, monospace = TRUE, color = "#15803d")
+```
+
+---
+
+## 8. How to Run
+
+### Interactive (RStudio console)
+
+```r
+source(here("00_libraries.R"))
+source(here("scripts/00_init_universe.R"))
+source(here("scripts/01_etf_wrangle.R"))
+rt <- build_regime_table(xts_ret[, "SPY"])
+
+# Phase 2.1 — Stabilizer
+source(here("scripts_daa_saa_taa/05_dd_stabilizer.R"))
+# → auto-runs find_stabilizers() + saves fingerprints to ticker_fingerprints/
+
+# Phase 2.2 — Enhancer
+source(here("scripts_daa_saa_taa/08_enhancer_screen.R"))
+# → auto-runs find_enhancers() + saves fingerprints to ticker_fingerprints/
+
+# Overlay backtest — Enhancer
+source(here("scripts_daa_saa_taa/09_overlay_backtest.R"))
+ob <- run_overlay_backtest(enh$selected$ticker, xts_ret, rt, role = "Enhancer")
+```
+
+### Rendered reports
+
+```r
+# Enhancer overlay report
+rmarkdown::render(
+  here::here("scripts_daa_saa_taa/overlay_backtest_report.Rmd"),
+  output_file = here::here("scripts_daa_saa_taa/enhancer_overlay_report.html"),
+  params = list(role = "Enhancer", overlay_w = 0.10),
+  envir  = new.env()
+)
+
+# Stabilizer overlay report
+rmarkdown::render(
+  here::here("scripts_daa_saa_taa/overlay_backtest_report.Rmd"),
+  output_file = here::here("scripts_daa_saa_taa/stabilizer_overlay_report.html"),
+  params = list(role = "Stabilizer", overlay_w = 0.10),
+  envir  = new.env()
+)
+```
+
+---
+
+*Document generated: `r Sys.Date()` — ETF Intelligence Project, Phase 2 session.*

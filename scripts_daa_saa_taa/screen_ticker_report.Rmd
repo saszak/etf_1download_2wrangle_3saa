@@ -1,0 +1,168 @@
+---
+title: "Ticker Screen"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: false
+    theme: flatly
+    highlight: tango
+params:
+  ticker:         "GLD"
+  overlay_w:      0.10
+  baseline:       ""        # ticker name in xts_ret (from portfolio_maker); overrides w_eq/w_fi
+  w_eq:           0.60      # used only when baseline = ""
+  w_fi:           0.40      # used only when baseline = ""
+  baseline_label: "6040Classic"
+---
+
+```{css, echo=FALSE}
+.verdict-pass { background:#f0fdf4; border-left:5px solid #16a34a; padding:10px 16px; margin:10px 0; border-radius:0 4px 4px 0; }
+.verdict-fail { background:#fef2f2; border-left:5px solid #dc2626; padding:10px 16px; margin:10px 0; border-radius:0 4px 4px 0; }
+.verdict-dual { background:#eff6ff; border-left:5px solid #1d4ed8; padding:10px 16px; margin:10px 0; border-radius:0 4px 4px 0; }
+.metric-row   { background:#f8fafc; padding:8px 14px; margin:4px 0; border-radius:4px; font-family:monospace; font-size:13px; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, message=FALSE, warning=FALSE,
+                      fig.width=13, fig.height=14)
+
+library(tidyverse); library(xts); library(zoo)
+library(patchwork); library(scales); library(knitr); library(kableExtra); library(here)
+
+if (!exists("project_tree"))       source(here("project_tree.R"))
+if (!exists("etf_metadata"))       source(here(project_tree$scripts$init))
+if (!exists("xts_ret"))            source(here(project_tree$scripts$wrangle))
+if (!exists("build_regime_table")) source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+if (!exists("rt") || !is.data.frame(rt)) rt <- build_regime_table(xts_ret[, "SPY"])
+if (!exists(".build_baseline"))    source(here("scripts_daa_saa_taa/08_enhancer_screen.R"))
+if (!exists("find_stabilizers"))   source(here("scripts_daa_saa_taa/05_dd_stabilizer.R"))
+if (!exists("screen_ticker"))      source(here("scripts_daa_saa_taa/screen_ticker.R"))
+if (!exists("plot_xts_pair"))      source(here("utility/plot_xts_pair.R"))
+
+result <- screen_ticker(
+  ticker         = params$ticker,
+  overlay_w      = params$overlay_w,
+  baseline       = if (nchar(trimws(params$baseline)) > 0) trimws(params$baseline) else NULL,
+  w_eq           = params$w_eq,
+  w_fi           = params$w_fi,
+  baseline_label = params$baseline_label,
+  print_plot     = FALSE
+)
+
+enh  <- result$enhancer
+stab <- result$stabilizer
+bl   <- result$baseline
+
+tk_name <- if (exists("etf_metadata"))
+  etf_metadata %>% filter(ticker == params$ticker) %>% pull(name) %>% first() else ""
+tk_name <- if (length(tk_name) == 0 || is.na(tk_name)) "" else tk_name
+
+overall <- case_when(
+  enh$pass & stab$pass  ~ "dual",
+  enh$pass              ~ "enhancer",
+  stab$pass             ~ "stabilizer",
+  TRUE                  ~ "neither"
+)
+```
+
+# `r params$ticker` — `r tk_name`
+
+**Baseline:** `r params$baseline_label` (`r round(params$w_eq*100)`% SPY + `r round(params$w_fi*100)`% IEF)
+**Overlay weight:** `r round(params$overlay_w*100)`%  |  **Current regime:** `r enh$cur_regime`  |  **History:** `r enh$n_days` days
+
+---
+
+```{r verdict}
+if (overall == "dual") {
+  cat(sprintf('<div class="verdict-dual"><strong>✅ DUAL ROLE</strong> — qualifies as both <strong>%s Enhancer</strong> and <strong>%s Stabilizer</strong></div>',
+              enh$trigger_type, stab$hedge_type))
+} else if (overall == "enhancer") {
+  cat(sprintf('<div class="verdict-pass"><strong>✅ ENHANCER</strong> — %s</div>', enh$trigger_label))
+} else if (overall == "stabilizer") {
+  cat(sprintf('<div class="verdict-pass"><strong>✅ STABILIZER</strong> — %s</div>', stab$hedge_label))
+} else {
+  cat('<div class="verdict-fail"><strong>❌ NEITHER</strong> — does not qualify as enhancer or stabilizer at this baseline and overlay weight</div>')
+}
+```
+
+## Baseline stats
+
+```{r bl-table}
+bl %>%
+  mutate(across(where(is.numeric), ~ round(., 4))) %>%
+  mutate(ann_ret = sprintf("%+.1f%%", ann_ret*100),
+         max_dd  = sprintf("%.1f%%",  max_dd*100),
+         ann_vol = sprintf("%.1f%%",  ann_vol*100),
+         ir      = sprintf("%.2f",    ir)) %>%
+  kable(col.names = c("Series", "Ann Ret", "MaxDD", "Ann Vol", "IR"), align="lrrrr") %>%
+  kable_styling(bootstrap_options="condensed", full_width=FALSE, font_size=12)
+```
+
+## Enhancer assessment — `r enh$verdict`
+
+```{r enh-table}
+tibble(
+  Metric = c("Trigger type", "Full-period IR", "Full excess (ann)",
+             "Fall excess", "Recovery excess", "Consolidation excess",
+             "Rolling IR 63d", "Regime excess (current)", "200DMA signal", "Spread momentum"),
+  Value  = c(
+    enh$trigger_label,
+    sprintf("%.2f  (floor: %.2f)  %s", enh$full_ir, 0.20,
+            if(!is.na(enh$full_ir) && enh$full_ir > 0.20) "✓" else "✗"),
+    sprintf("%+.1f%%", enh$full_excess_ann * 100),
+    if(is.na(enh$fall_excess_ann))  "n/a" else sprintf("%+.1f%%", enh$fall_excess_ann*100),
+    if(is.na(enh$recov_excess_ann)) "n/a" else sprintf("%+.1f%%", enh$recov_excess_ann*100),
+    if(is.na(enh$cons_excess_ann))  "n/a" else sprintf("%+.1f%%", enh$cons_excess_ann*100),
+    sprintf("%.2f", enh$rolling_ir_63d),
+    if(is.na(enh$regime_excess)) "n/a" else sprintf("%+.1f%%", enh$regime_excess*100),
+    if(is.na(enh$trend_on)) "n/a" else if(enh$trend_on==1) "ON (above 200DMA)" else "OFF (below 200DMA)",
+    sprintf("%+.4f  (%s)", enh$spread_momentum,
+            if(enh$spread_momentum > 0) "accelerating ✓" else "fading ✗")
+  )
+) %>%
+  kable(align="ll") %>%
+  kable_styling(bootstrap_options=c("striped","condensed"), font_size=12) %>%
+  row_spec(1, bold=TRUE,
+           background = switch(enh$trigger_type, "A"="#ede9fe", "B"="#fef9c3", "C"="#dcfce7", "white"))
+```
+
+## Stabilizer assessment — `r stab$verdict`
+
+```{r stab-table}
+tibble(
+  Metric = c("Hedge type", "DD reduction", "Fall DD reduction", "Return drag",
+             "Insurance ratio", "Fall correlation", "Full correlation",
+             "Rolling corr 63d", "Own MaxDD", "Own return", "Own momentum 63d"),
+  Value  = c(
+    stab$hedge_label,
+    sprintf("%+.1f pp  %s", stab$dd_reduction*100,
+            if(stab$dd_reduction > 0) "✓" else "✗"),
+    if(is.na(stab$fall_dd_red)) "n/a" else sprintf("%+.1f pp", stab$fall_dd_red*100),
+    sprintf("%+.1f pp/yr", stab$return_drag*100),
+    sprintf("%.2f", stab$insurance_ratio),
+    if(is.na(stab$fall_corr)) "n/a" else sprintf("%+.2f  (%s)",
+      stab$fall_corr,
+      if(stab$fall_corr <= -0.10) "FULL ✓" else if(stab$fall_corr <= 0.30) "PARTIAL" else "CONDITIONAL ✗"),
+    sprintf("%+.2f", stab$full_corr),
+    sprintf("%+.2f", stab$roll_corr_63d),
+    sprintf("%.1f%%", stab$own_maxdd*100),
+    sprintf("%+.1f%%", stab$own_ret*100),
+    sprintf("%+.1f%%", stab$own_momentum_63d*100)
+  )
+) %>%
+  kable(align="ll") %>%
+  kable_styling(bootstrap_options=c("striped","condensed"), font_size=12) %>%
+  row_spec(1, bold=TRUE,
+           background = switch(stab$hedge_type,
+             "FULL"="#dbeafe", "PARTIAL"="#fef9c3", "CONDITIONAL"="#fce7f3", "white"))
+```
+
+## Fingerprint
+
+```{r fingerprint, fig.height=14}
+print(result$plot$combined)
+```
+
+---
+*Generated by `screen_ticker("` `r params$ticker` `")` — `r Sys.Date()`*

@@ -1,0 +1,515 @@
+---
+title: "Stock Market Return Matrix"
+subtitle: "S&P 500 Nominal Price Returns — Documentation & Analysis"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    fig_caption: true
+params:
+  from_yr:      1900   # first FROM year in the matrix
+  to_yr:        null   # null = latest available; or e.g. 2024
+  show_25yr:    true   # draw 25-year period diagonal
+  show_text:    true   # show annualised return numbers in cells
+  force_refresh: false # re-download Shiller data even if cached
+---
+
+```{css, echo=FALSE}
+.doc-note {
+  background: #fffbeb;
+  border-left: 4px solid #d97706;
+  padding: 8px 14px;
+  margin: 10px 0;
+  font-size: 0.88em;
+  color: #444;
+}
+.finding-box {
+  background: #f0fdf4;
+  border-left: 4px solid #16a34a;
+  padding: 10px 16px;
+  margin: 12px 0;
+  font-size: 0.9em;
+}
+.warn-box {
+  background: #fef2f2;
+  border-left: 4px solid #dc2626;
+  padding: 8px 14px;
+  margin: 10px 0;
+  font-size: 0.88em;
+}
+.caption {
+  color: #555;
+  font-size: 0.82em;
+  font-style: italic;
+  border-left: 3px solid #1B3A6B;
+  padding-left: 6px;
+  margin-top: 4px;
+}
+.colour-swatch {
+  display: inline-block;
+  width: 18px; height: 18px;
+  border-radius: 3px;
+  vertical-align: middle;
+  margin-right: 4px;
+}
+.section-div { border-top: 2px solid #dee2e6; margin: 48px 0 24px 0; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 13,
+  fig.height = 7
+)
+
+library(tidyverse)
+library(readxl)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(here)
+
+select <- dplyr::select
+
+if (!exists("params"))
+  params <- list(from_yr = 1900, to_yr = NULL, show_25yr = TRUE,
+                 show_text = TRUE, force_refresh = FALSE)
+
+# ── Load chart function ───────────────────────────────────────────────────────
+source(here("key_plots/chart_stock_matrix.R"))
+
+# ── Build data ────────────────────────────────────────────────────────────────
+annual <- .load_shiller_annual(
+  cache_path    = here("input/shiller_annual.rds"),
+  force_refresh = isTRUE(params$force_refresh)
+)
+
+to_yr   <- if (is.null(params$to_yr)) max(annual$year) else as.integer(params$to_yr)
+from_yr <- as.integer(params$from_yr)
+
+mat <- .build_return_matrix(annual, from_yr - 1, to_yr) %>%
+  filter(from >= from_yr, to <= to_yr)
+
+n_years  <- to_yr - from_yr + 1
+n_cells  <- nrow(mat)
+n_yrs_data <- as.numeric(diff(range(annual$year)))
+```
+
+---
+
+# What This Chart Shows
+
+The **Stock Market Return Matrix** answers a single question for every possible entry and exit year:
+
+> *"If you invested in the S&P 500 at the start of year X and sold at the end of year Y, what was your annualised nominal return?"*
+
+Each cell in the lower-right triangle shows the **annualised price-only return** (no dividends, no inflation adjustment) for that FROM→TO period, colour-coded by magnitude.
+
+<div class="doc-note">
+This is a reproduction of the <strong>Crestmont Research Stock Market Matrix</strong>
+(www.CrestmontResearch.com), rebuilt from the same underlying data source (Robert Shiller / Yale).
+Original copyright 2002–2025 Crestmont Research.
+</div>
+
+---
+
+# Colour Legend & Reading the Matrix
+
+```{r legend-table}
+leg <- tibble(
+  ` ` = c(
+    "<span class='colour-swatch' style='background:#c0392b'></span>",
+    "<span class='colour-swatch' style='background:#e8a0b4'></span>",
+    "<span class='colour-swatch' style='background:#2155a0'></span>",
+    "<span class='colour-swatch' style='background:#5aab5a'></span>",
+    "<span class='colour-swatch' style='background:#1a6b1a'></span>"
+  ),
+  Band          = c("Red", "Pink", "Blue", "Light Green", "Dark Green"),
+  `Return range` = c("< 0%", "0% to 3%", "3% to 7%", "7% to 10%", "> 10%"),
+  Interpretation = c(
+    "Loss — negative annualised return over the period",
+    "Near-zero real return after inflation (~2–3%/yr CPI); wealth preserved, not grown",
+    "Moderate nominal return; modest real gain after inflation",
+    "Good nominal return; solid real gain",
+    "Strong compounding — typically short bull market periods"
+  )
+)
+
+kable(leg, escape = FALSE,
+      col.names = c("", "Band", "Return range", "Interpretation"),
+      caption = "Colour bands — annualised nominal price return") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, width = "2em") %>%
+  column_spec(2, bold = TRUE) %>%
+  column_spec(3, monospace = TRUE)
+```
+
+**How to read a cell:**
+Pick a FROM year on the left axis, a TO year on the top axis, find the intersection — the number is the annualised % return for that holding period.
+
+**White numbers** = P/E10 (CAPE) *decreased* over the period. The return was earned in a valuation headwind — price gains came from earnings growth alone, not multiple expansion. These are considered more "durable" returns by Crestmont.
+
+**The 25-year diagonal line** (when shown) marks the boundary where holding periods equal 25 years. All cells to the right of the line are 25+ year periods.
+
+---
+
+# The Matrix {.tabset}
+
+## Full matrix (`r from_yr`–`r to_yr`)
+
+```{r full-matrix, fig.width=16, fig.height=15}
+plot_stock_matrix(
+  from_yr       = from_yr,
+  to_yr         = to_yr,
+  show_25yr     = isTRUE(params$show_25yr),
+  show_text     = isTRUE(params$show_text),
+  force_refresh = FALSE
+)
+```
+
+<p class="caption">
+Annualised nominal S&P 500 price returns (no dividends). Each cell = holding period from row year
+to column year. Numbers = annualised return (%). White numbers = CAPE decreased (valuation headwind).
+Black diagonal line = 25-year holding period boundary.
+Save the plot as a large PNG for full legibility:
+<code>ggsave(here("key_plots/stock_matrix.png"), width=22, height=20, dpi=200)</code>
+</p>
+
+## Post-war only (1950–`r to_yr`)
+
+```{r postwar-matrix, fig.width=14, fig.height=13}
+plot_stock_matrix(
+  from_yr   = 1950,
+  to_yr     = to_yr,
+  show_25yr = TRUE,
+  show_text = isTRUE(params$show_text)
+)
+```
+
+<p class="caption">Post-war subset (1950 onwards). More readable at screen size. Same colour coding.</p>
+
+## Recent decades (1990–`r to_yr`)
+
+```{r recent-matrix, fig.width=10, fig.height=9}
+plot_stock_matrix(
+  from_yr   = 1990,
+  to_yr     = to_yr,
+  show_25yr = TRUE,
+  show_text = TRUE
+)
+```
+
+<p class="caption">1990 onwards — fully legible cell numbers at screen resolution.</p>
+
+---
+
+# Statistical Analysis {.tabset}
+
+```{r stats-prep}
+# Return distribution by holding period bucket
+mat_analysis <- mat %>%
+  mutate(
+    hold_yrs = to - from,
+    hold_bucket = cut(hold_yrs,
+      breaks = c(0, 1, 5, 10, 20, 30, Inf),
+      labels = c("1 yr", "2-5 yrs", "6-10 yrs", "11-20 yrs", "21-30 yrs", "30+ yrs"),
+      right  = TRUE
+    )
+  )
+```
+
+## Return distribution by holding period
+
+```{r dist-plot, fig.height=6}
+ggplot(mat_analysis %>% filter(!is.na(hold_bucket)),
+       aes(x = ann_ret_pct, fill = band)) +
+  geom_histogram(bins = 40, colour = "white", linewidth = 0.15) +
+  scale_fill_manual(values = SM_FILL, limits = SM_LABELS,
+                    labels = c("< 0%","0-3%","3-7%","7-10%","> 10%"),
+                    name = NULL) +
+  geom_vline(xintercept = 0, colour = "#111", linewidth = 0.6, linetype = "dashed") +
+  facet_wrap(~ hold_bucket, scales = "free_y", ncol = 3) +
+  scale_x_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    title    = "Distribution of annualised returns by holding period",
+    subtitle = paste0("All FROM-TO pairs, ", from_yr, "-", to_yr,
+                      " (n = ", scales::comma(n_cells), " periods)"),
+    x = "Annualised return (%)", y = "Count"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor  = element_blank(),
+    strip.text        = element_text(face = "bold"),
+    legend.position   = "bottom"
+  )
+```
+
+<p class="caption">As holding period lengthens the distribution narrows and shifts right — time diversification at work. Negative returns become rare beyond 10-year periods.</p>
+
+## Probability of positive return
+
+```{r prob-table}
+prob_tbl <- mat_analysis %>%
+  filter(!is.na(ann_ret_pct)) %>%
+  group_by(`Holding period` = hold_bucket) %>%
+  summarise(
+    `N periods`        = n(),
+    `% Positive`       = paste0(round(mean(ann_ret_pct > 0)  * 100, 1), "%"),
+    `% Above 3%`       = paste0(round(mean(ann_ret_pct > 3)  * 100, 1), "%"),
+    `% Above 7%`       = paste0(round(mean(ann_ret_pct > 7)  * 100, 1), "%"),
+    `Median ann. ret`  = paste0(round(median(ann_ret_pct), 1), "%"),
+    `Mean ann. ret`    = paste0(round(mean(ann_ret_pct),   1), "%"),
+    `Worst`            = paste0(round(min(ann_ret_pct),    1), "%"),
+    `Best`             = paste0(round(max(ann_ret_pct),    1), "%"),
+    .groups = "drop"
+  )
+
+kable(prob_tbl,
+      caption = paste0("Return statistics by holding period (", from_yr, "-", to_yr, ")")) %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 11) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A")
+```
+
+## Colour band frequency
+
+```{r band-freq, fig.height=5}
+band_freq <- mat_analysis %>%
+  filter(!is.na(band)) %>%
+  group_by(hold_bucket, band) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(hold_bucket) %>%
+  mutate(pct = n / sum(n)) %>%
+  ungroup() %>%
+  mutate(band = factor(band, levels = SM_LABELS))
+
+ggplot(band_freq, aes(x = hold_bucket, y = pct, fill = band)) +
+  geom_col(width = 0.75) +
+  scale_fill_manual(values = SM_FILL, limits = SM_LABELS,
+                    labels = c("< 0%","0-3%","3-7%","7-10%","> 10%"),
+                    name = "Return band") +
+  scale_y_continuous(labels = percent_format(), expand = c(0, 0)) +
+  labs(
+    title    = "Return band composition by holding period",
+    subtitle = "How often does each return band appear as holding period lengthens?",
+    x = "Holding period", y = "% of all periods"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor  = element_blank(),
+    panel.grid.major.x = element_blank(),
+    legend.position   = "right"
+  )
+```
+
+<p class="caption">Red and Pink (low/negative returns) dominate short periods; Blue and Green dominate long periods. Beyond 20 years almost no Red remains in this history.</p>
+
+---
+
+# P/E Ratio & White Numbers {.tabset}
+
+<div class="doc-note">
+Crestmont's key insight: a market return has two components — <strong>earnings growth</strong>
+and <strong>P/E expansion</strong>. White numbers show periods where all return came from
+earnings alone (P/E headwind). These are considered more durable. Coloured numbers include
+a P/E tailwind that may not repeat.
+</div>
+
+## P/E history
+
+```{r pe-history, fig.height=4}
+annual %>%
+  filter(year >= from_yr, year <= to_yr, !is.na(cape_avg)) %>%
+  ggplot(aes(x = year, y = cape_avg)) +
+  geom_line(colour = "#2155a0", linewidth = 0.9) +
+  geom_hline(yintercept = mean(annual$cape_avg, na.rm = TRUE),
+             linetype = "dashed", colour = "#888", linewidth = 0.5) +
+  annotate("text", x = from_yr + 2,
+           y = mean(annual$cape_avg, na.rm = TRUE) + 1.5,
+           label = paste0("Avg = ", round(mean(annual$cape_avg, na.rm=TRUE), 1)),
+           size = 3, colour = "#888") +
+  scale_x_continuous(breaks = seq(from_yr, to_yr, by = 10)) +
+  labs(
+    title    = "CAPE (P/E10) — annual average",
+    subtitle = "Robert Shiller cyclically adjusted P/E ratio. Dashed = long-run average.",
+    x = NULL, y = "CAPE"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank())
+```
+
+## White vs coloured number breakdown
+
+```{r white-numbers}
+pe_tbl <- mat %>%
+  filter(!is.na(pe_fell), !is.na(band)) %>%
+  group_by(`Holding period` = cut(to - from,
+    breaks = c(0,1,5,10,20,30,Inf),
+    labels = c("1 yr","2-5 yrs","6-10 yrs","11-20 yrs","21-30 yrs","30+ yrs"),
+    right = TRUE
+  )) %>%
+  summarise(
+    `N periods`        = n(),
+    `P/E fell (white)` = paste0(round(mean(pe_fell) * 100, 1), "%"),
+    `P/E rose`         = paste0(round(mean(!pe_fell) * 100, 1), "%"),
+    `Avg ret (P/E fell)`  = paste0(round(mean(ann_ret_pct[pe_fell],  na.rm=TRUE), 1), "%"),
+    `Avg ret (P/E rose)`  = paste0(round(mean(ann_ret_pct[!pe_fell], na.rm=TRUE), 1), "%"),
+    .groups = "drop"
+  )
+
+kable(pe_tbl,
+      caption = "P/E direction by holding period — white (fell) vs coloured (rose) numbers") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 11) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A")
+```
+
+---
+
+# Data & Methodology {.tabset}
+
+## Data source
+
+```{r data-table}
+data_tbl <- tibble(
+  Item = c(
+    "Price index", "P/E ratio", "Returns type",
+    "Dividends", "Inflation", "Transaction costs",
+    "Data source", "Annual price", "Update frequency"
+  ),
+  Detail = c(
+    "S&P 500 Composite (and predecessor indices pre-1957)",
+    "CAPE / P/E10 — cyclically adjusted using 10-year average earnings (Robert Shiller methodology)",
+    "Nominal price-only (not total return)",
+    "NOT included — price index only",
+    "NOT adjusted — all figures are nominal",
+    "NOT included",
+    paste0("Robert Shiller / Yale University — ie_data.xls  |  ",
+           "History: ", min(annual$year), " \u2013 ", max(annual$year),
+           "  (", nrow(annual), " annual observations)"),
+    "Annual average of monthly price observations (12 months per year)",
+    "Annually, when Shiller updates ie_data.xls"
+  )
+)
+
+kable(data_tbl, caption = "Data and methodology specification") %>%
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                font_size = 11) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A", width = "18em")
+```
+
+## Return calculation
+
+The annualised return for a FROM→TO period is:
+
+$$\text{Ann. Return} = \left(\frac{\bar{P}_{TO}}{\bar{P}_{FROM}}\right)^{\frac{1}{TO - FROM}} - 1$$
+
+where $\bar{P}_{year}$ is the **annual average price** (mean of all 12 monthly observations).
+
+Key implications:
+- A 1-year return uses consecutive annual averages, not January-to-January or December-to-December prices
+- This smooths intra-year volatility and matches Shiller's published convention
+- Dividends are excluded — total return would be roughly 4–5pp/yr higher over most of history
+
+## Coverage summary
+
+```{r coverage}
+cov_tbl <- tibble(
+  Metric = c(
+    "FROM year range",
+    "TO year range",
+    "Total holding periods computed",
+    "1-year periods",
+    "5-year periods",
+    "10-year periods",
+    "20-year periods",
+    "25-year periods",
+    "Cells with P/E data (white/colour flag)"
+  ),
+  Value = c(
+    paste0(from_yr, " \u2013 ", to_yr - 1),
+    paste0(from_yr + 1, " \u2013 ", to_yr),
+    scales::comma(n_cells),
+    scales::comma(sum(mat$to - mat$from == 1)),
+    scales::comma(sum(mat$to - mat$from == 5)),
+    scales::comma(sum(mat$to - mat$from == 10)),
+    scales::comma(sum(mat$to - mat$from == 20)),
+    scales::comma(sum(mat$to - mat$from == 25)),
+    paste0(scales::comma(sum(!is.na(mat$pe_fell))),
+           " (", round(mean(!is.na(mat$pe_fell))*100), "%)")
+  )
+)
+
+kable(cov_tbl, caption = "Matrix coverage") %>%
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover", "condensed", "bordered"),
+                position = "left", font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") %>%
+  column_spec(1, bold = TRUE, color = "#1B2A4A")
+```
+
+---
+
+# How to Render & Save
+
+```{r render-code, echo=TRUE, eval=FALSE}
+# ── From RStudio console ──────────────────────────────────────────────────────
+
+# Quick view (loads functions + auto-runs quick-run block):
+source(here::here("key_plots/chart_stock_matrix.R"))
+
+# Full-resolution PNG (open in Finder/Preview for legibility):
+p <- plot_stock_matrix(from_yr = 1900, show_25yr = TRUE)
+ggsave(here::here("key_plots/stock_matrix.png"), p,
+       width = 22, height = 20, dpi = 200, bg = "white")
+
+# Post-war only (faster, more readable at screen size):
+p <- plot_stock_matrix(from_yr = 1950)
+ggsave(here::here("key_plots/stock_matrix_postwar.png"), p,
+       width = 14, height = 13, dpi = 200, bg = "white")
+
+# ── Render this report ────────────────────────────────────────────────────────
+rmarkdown::render(
+  here::here("Rmd/stock_matrix_report.Rmd"),
+  output_file = here::here("03_reports/stock_matrix_report.html"),
+  params = list(from_yr = 1900, show_25yr = TRUE, show_text = TRUE),
+  envir  = new.env()
+)
+
+# ── Force data refresh ────────────────────────────────────────────────────────
+rmarkdown::render(
+  here::here("Rmd/stock_matrix_report.Rmd"),
+  output_file = here::here("03_reports/stock_matrix_report.html"),
+  params = list(force_refresh = TRUE),
+  envir  = new.env()
+)
+```
+
+---
+
+```{r footer}
+cat(sprintf(
+  "_Generated %s &nbsp;|&nbsp; FROM: %d &nbsp;|&nbsp; TO: %d &nbsp;|&nbsp; %s holding periods &nbsp;|&nbsp; Data: Shiller Yale ie\\_data.xls_",
+  format(Sys.Date(), "%Y-%m-%d"),
+  from_yr, to_yr,
+  scales::comma(n_cells)
+))
+```

@@ -1,0 +1,296 @@
+---
+title: "Phase 2 — Overlay Backtest Report"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+params:
+  role:         "Enhancer"   # "Enhancer" | "Stabilizer"
+  tickers:      !r NULL      # NULL → auto-loaded from find_enhancers() / find_stabilizers()
+  overlay_w:    0.10
+  w_eq:         0.60
+  w_fi:         0.40
+  ma_win:       200
+---
+
+```{css, echo=FALSE}
+.exec-box {
+  background: #f0f9ff;
+  border-left: 5px solid #1d4ed8;
+  padding: 14px 18px;
+  margin: 16px 0;
+  font-size: 0.94em;
+  border-radius: 3px;
+}
+.rec-box {
+  background: #f0fdf4;
+  border-left: 5px solid #15803d;
+  padding: 14px 18px;
+  margin: 16px 0;
+  font-size: 0.94em;
+  border-radius: 3px;
+}
+.warn-box {
+  background: #fefce8;
+  border-left: 5px solid #ca8a04;
+  padding: 10px 16px;
+  margin: 10px 0;
+  font-size: 0.92em;
+}
+.type-a { background:#ede9fe; border-left:4px solid #7c3aed; padding:5px 12px; margin:4px 0; }
+.type-b { background:#fef9c3; border-left:4px solid #ca8a04; padding:5px 12px; margin:4px 0; }
+.type-c { background:#dcfce7; border-left:4px solid #16a34a; padding:5px 12px; margin:4px 0; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 14,
+  fig.height = 6
+)
+
+library(tidyverse)
+library(xts)
+library(zoo)
+library(patchwork)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(here)
+
+# ── Environment ───────────────────────────────────────────────────────────────
+if (!exists("project_tree"))       source(here("project_tree.R"))
+if (!exists("etf_metadata"))       source(here(project_tree$scripts$init))
+if (!exists("xts_ret"))            source(here(project_tree$scripts$wrangle))
+if (!exists("build_regime_table")) source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+if (!exists("rt") || !is.data.frame(rt))
+  rt <- build_regime_table(xts_ret[, "SPY"])
+
+W_EQ           <- params$w_eq
+W_FI           <- params$w_fi
+OVERLAY_W      <- params$overlay_w
+MA_WIN         <- as.integer(params$ma_win)
+BASELINE_LABEL <- sprintf("%d/%d Classic", round(W_EQ * 100), round(W_FI * 100))
+ROLE           <- params$role   # "Enhancer" | "Stabilizer"
+
+if (!exists(".build_baseline")) source(here("scripts_daa_saa_taa/08_enhancer_screen.R"))
+source(here("scripts_daa_saa_taa/09_overlay_backtest.R"))
+
+# ── Resolve tickers ───────────────────────────────────────────────────────────
+# Priority: (1) explicit params$tickers, (2) run the relevant screen
+tickers <- params$tickers
+
+if (is.null(tickers)) {
+  if (ROLE == "Enhancer") {
+    if (!exists("find_enhancers")) source(here("scripts_daa_saa_taa/08_enhancer_screen.R"))
+    enh     <- find_enhancers(xts_ret, rt)
+    tickers <- enh$selected$ticker
+  } else {
+    if (!exists("find_stabilizers")) source(here("scripts_daa_saa_taa/05_dd_stabilizer.R"))
+    stab    <- find_stabilizers(xts_ret, rt)
+    tickers <- stab$selected$ticker
+  }
+}
+
+# ── Run backtest ──────────────────────────────────────────────────────────────
+ob <- run_overlay_backtest(
+  tickers        = tickers,
+  xts_ret        = xts_ret,
+  rt             = rt,
+  role           = ROLE,
+  w_eq           = W_EQ,
+  w_fi           = W_FI,
+  baseline_label = BASELINE_LABEL,
+  overlay_w      = OVERLAY_W,
+  ma_win         = MA_WIN,
+  save_png       = FALSE
+)
+
+comp    <- ob$comparison
+optimal <- ob$optimal
+rec     <- optimal$recommendations
+
+# Colour / accent by role
+accent_col  <- if (ROLE == "Enhancer") "#1d4ed8" else "#15803d"
+accent_fill <- if (ROLE == "Enhancer") "#eff6ff"  else "#f0fdf4"
+phase_tag   <- if (ROLE == "Enhancer") "Phase 2.2 — Enhancer Overlay" else "Phase 2.1 — Stabilizer Overlay"
+crit_label  <- if (optimal$criterion == "dd") "lowest MaxDD" else "highest IR"
+
+cur_regime <- {
+  last_date <- as.Date(max(index(xts_ret)))
+  rd <- rt %>%
+    rowwise() %>%
+    mutate(date = list(seq(as.Date(xmin), as.Date(xmax), by = "day"))) %>%
+    unnest(date) %>%
+    ungroup() %>%
+    filter(date <= last_date) %>%
+    slice_tail(n = 1) %>%
+    pull(regime)
+  if (length(rd) == 0) "Consolidation" else rd
+}
+
+bl_stats <- purrr::map_dfr(comp$results, ~ .x$stats %>% filter(type == "Baseline")) %>%
+  summarise(ann_ret = mean(ann_ret), max_dd = mean(max_dd), ir = mean(ir))
+```
+
+---
+
+## `r phase_tag` — `r ROLE` Trigger Type Analysis
+
+::: {.exec-box}
+**Baseline:** `r BASELINE_LABEL` (`r round(W_EQ*100)`% SPY + `r round(W_FI*100)`% IEF)
+**Overlay weight:** `r round(OVERLAY_W*100)`%  per ticker
+**Tickers evaluated:** `r paste(tickers, collapse = "  |  ")`
+**Current SPY regime:** **`r cur_regime`**
+**Selection criterion:** `r crit_label`
+:::
+
+---
+
+## Executive Summary & Recommendations
+
+```{r exec-summary-table}
+rec_display <- rec %>%
+  mutate(
+    ann_ret_f  = sprintf("%+.1f%%", ann_ret  * 100),
+    max_dd_f   = sprintf("%.1f%%",  max_dd   * 100),
+    ir_f       = sprintf("%.2f",    ir),
+    ret_delta_f= sprintf("%+.1f pp",ret_delta * 100),
+    dd_delta_f = sprintf("%+.1f pp",dd_delta  * 100),
+    type_label = case_when(
+      type == "A" ~ "A — Unconditional",
+      type == "B" ~ "B — Regime-conditional",
+      type == "C" ~ "C — 200DMA signal"
+    )
+  ) %>%
+  select(Ticker = ticker, `Recommended type` = type_label,
+         `Ann Ret` = ann_ret_f, MaxDD = max_dd_f, IR = ir_f,
+         `ΔRet` = ret_delta_f, `ΔDD` = dd_delta_f,
+         Reason = reason)
+
+rec_display %>%
+  kable(align = "llrrrrrrl") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) %>%
+  row_spec(which(rec$type == "A"), background = "#ede9fe") %>%
+  row_spec(which(rec$type == "B"), background = "#fef9c3") %>%
+  row_spec(which(rec$type == "C"), background = "#dcfce7") %>%
+  column_spec(2, bold = TRUE) %>%
+  column_spec(8, italic = TRUE, color = "grey40")
+```
+
+```{r optimal-stats}
+if (!is.null(optimal$optimal_stats)) {
+  optimal$optimal_stats %>%
+    mutate(
+      ann_ret = sprintf("%+.1f%%", ann_ret * 100),
+      max_dd  = sprintf("%.1f%%",  max_dd  * 100),
+      ann_vol = sprintf("%.1f%%",  ann_vol * 100),
+      ir      = sprintf("%.2f",    ir)
+    ) %>%
+    kable(
+      col.names = c("Portfolio", "Ann Ret", "MaxDD", "Ann Vol", "IR"),
+      align = "lrrrr",
+      caption = sprintf("Optimal combination vs %s (equal-weight, %.0f%% each ticker)",
+                        BASELINE_LABEL, OVERLAY_W * 100)
+    ) %>%
+    kable_styling(bootstrap_options = c("condensed", "hover"), full_width = FALSE,
+                  font_size = 12) %>%
+    row_spec(1, bold = TRUE, background = "#f1f5f9") %>%
+    row_spec(2, bold = TRUE, background = accent_fill)
+}
+```
+
+::: {.rec-box}
+**Implementation spec — `r ROLE` overlay at `r round(OVERLAY_W*100)`% per ticker:**
+
+```{r impl-spec, results='asis'}
+for (i in seq_len(nrow(rec))) {
+  r <- rec[i, ]
+  tag <- switch(r$type,
+    "A" = "**Type A — hold always**",
+    "B" = "**Type B — hold in Recovery + Consolidation; exit in Fall**",
+    "C" = "**Type C — hold when above 200DMA; exit when below**"
+  )
+  cat(sprintf("- **%s** → %s  *(IR: %.2f | MaxDD: %.1f%% | ΔDD: %+.1f pp)*\n\n",
+              r$ticker, tag, r$ir, r$max_dd * 100, r$dd_delta * 100))
+}
+```
+:::
+
+### Trigger type legend
+
+<div class="type-a">**A — Unconditional:** blend held always at fixed weight. No switching cost. Suitable when the ticker adds value in all regimes.</div>
+<div class="type-b">**B — Regime-conditional:** blend held in Recovery + Consolidation; revert to baseline in Fall. Avoids drawdown amplification. Lag risk: Fall fires after ~10% already absorbed.</div>
+<div class="type-c">**C — 200DMA signal:** blend held when ticker is above its `r MA_WIN`-day MA. Smoother entry/exit than hard regime switch. Whipsaw risk in choppy markets.</div>
+
+---
+
+## Scoreboard
+
+Delta vs `r BASELINE_LABEL`. **Green = improvement.**
+
+```{r scoreboard, fig.height=max(4, length(comp$results) * 0.65 + 3), echo=TRUE}
+# ob$p_scoreboard
+print(ob$p_scoreboard)
+```
+
+---
+
+## Wealth comparison grid
+
+`r round(OVERLAY_W*100)`% overlay, all three trigger types vs `r BASELINE_LABEL`.
+
+```{r grid, fig.height=length(comp$results)*3.8+2, echo=TRUE}
+# ob$p_grid
+print(ob$p_grid)
+```
+
+---
+
+## Full statistics table
+
+```{r full-stats}
+all_stats <- purrr::map_dfr(comp$results, ~ .x$stats) %>%
+  select(ticker, type, ann_ret, max_dd, ann_vol, ir) %>%
+  mutate(
+    ann_ret = sprintf("%+.1f%%", ann_ret * 100),
+    max_dd  = sprintf("%.1f%%",  max_dd  * 100),
+    ann_vol = sprintf("%.1f%%",  ann_vol * 100),
+    ir      = sprintf("%.2f",    ir)
+  ) %>%
+  arrange(ticker, factor(type, levels = c("Baseline", "A", "B", "C")))
+
+all_stats %>%
+  kable(col.names = c("Ticker", "Type", "Ann Ret", "MaxDD", "Ann Vol", "IR"),
+        align = "llrrrr") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) %>%
+  row_spec(which(all_stats$type == "Baseline"), background = "#f1f5f9", bold = TRUE) %>%
+  row_spec(which(all_stats$type == "A"),        background = "#ede9fe") %>%
+  row_spec(which(all_stats$type == "B"),        background = "#fef9c3") %>%
+  row_spec(which(all_stats$type == "C"),        background = "#dcfce7")
+```
+
+---
+
+## Session info
+
+```{r session}
+cat(sprintf("Report date      : %s\n", Sys.Date()))
+cat(sprintf("Role             : %s\n", ROLE))
+cat(sprintf("Baseline         : %s (%.0f%% SPY + %.0f%% IEF)\n",
+            BASELINE_LABEL, W_EQ * 100, W_FI * 100))
+cat(sprintf("Overlay weight   : %.0f%% per ticker\n", OVERLAY_W * 100))
+cat(sprintf("MA window (C)    : %d days\n", MA_WIN))
+cat(sprintf("Current regime   : %s\n", cur_regime))
+cat(sprintf("Selection crit.  : %s\n", crit_label))
+cat(sprintf("Tickers          : %s\n", paste(tickers, collapse = ", ")))
+```

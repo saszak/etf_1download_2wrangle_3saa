@@ -98,7 +98,7 @@ mod_regime_server <- function(id, filtered, relative_mode, bmk) {
 
     avail_tickers <- reactive({
       b    <- eff_bmk()
-      syms <- filtered()$symbol
+      syms <- filtered() %>% arrange(display_rank) %>% pull(symbol)
       syms <- syms[syms %in% colnames(xts_ret_shiny)]
       syms <- syms[syms != b]          # exclude benchmark itself (no self-overlay)
       syms
@@ -207,6 +207,9 @@ mod_regime_server <- function(id, filtered, relative_mode, bmk) {
           stat_id <- paste0("plot_stat_", i)
 
           # ── Plot 1: regime overlay + relative cumulative return ───────────
+          tk_name <- perf_data$short_name[perf_data$symbol == tk][1] %||% ""
+          tk_lbl  <- .tk_label(tk, tk_name)
+
           output[[ov_id]] <- renderPlot({
             tryCatch(
               plot_regime_overlay_ext(
@@ -230,7 +233,7 @@ mod_regime_server <- function(id, filtered, relative_mode, bmk) {
             tryCatch(
               plot_regime_stats(
                 xts_ret_col = xts_ret_shiny[, tk],
-                asset_name  = tk
+                asset_name  = tk_lbl
               ),
               error = function(e) {
                 ggplot() +

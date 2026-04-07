@@ -1,0 +1,192 @@
+---
+title: "Phase 2.2 — Overlay Backtest"
+subtitle: "Type A / B / C applied to a ticker set vs 6040Classic"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    self_contained: true
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+params:
+  tickers:    !r c("QQQ", "SMH", "XLK", "GLD", "TLT", "DJP", "PDBC", "USMV")
+  overlay_w:  0.10
+  w_eq:       0.60
+  w_fi:       0.40
+  ma_win:     200
+---
+
+```{css, echo=FALSE}
+.finding-box {
+  background: #f0f9ff;
+  border-left: 4px solid #2563eb;
+  padding: 10px 16px;
+  margin: 12px 0;
+  font-size: 0.92em;
+}
+.type-a { background:#ede9fe; border-left:4px solid #7c3aed; padding:6px 14px; margin:6px 0; }
+.type-b { background:#fef9c3; border-left:4px solid #ca8a04; padding:6px 14px; margin:6px 0; }
+.type-c { background:#dcfce7; border-left:4px solid #16a34a; padding:6px 14px; margin:6px 0; }
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 14,
+  fig.height = 6
+)
+
+library(tidyverse)
+library(xts)
+library(zoo)
+library(patchwork)
+library(scales)
+library(knitr)
+library(kableExtra)
+library(here)
+
+if (!exists("project_tree"))       source(here("project_tree.R"))
+if (!exists("etf_metadata"))       source(here(project_tree$scripts$init))
+if (!exists("xts_ret"))            source(here(project_tree$scripts$wrangle))
+if (!exists("build_regime_table")) source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+if (!exists("rt") || !is.data.frame(rt))
+  rt <- build_regime_table(xts_ret[, "SPY"])
+
+# Override params before sourcing
+W_EQ           <- params$w_eq
+W_FI           <- params$w_fi
+OVERLAY_W      <- params$overlay_w
+MA_WIN         <- as.integer(params$ma_win)
+BASELINE_LABEL <- sprintf("%d/%d Classic", round(W_EQ * 100), round(W_FI * 100))
+
+if (!exists(".build_baseline")) source(here("scripts_daa_saa_taa/08_enhancer_screen.R"))
+source(here("scripts_daa_saa_taa/09_overlay_backtest.R"))
+
+tickers <- params$tickers
+
+ob <- run_overlay_backtest(
+  tickers        = tickers,
+  xts_ret        = xts_ret,
+  rt             = rt,
+  w_eq           = W_EQ,
+  w_fi           = W_FI,
+  baseline_label = BASELINE_LABEL,
+  overlay_w      = OVERLAY_W,
+  ma_win         = MA_WIN,
+  save_png       = FALSE
+)
+
+comp <- ob$comparison
+```
+
+---
+
+## Framework
+
+::: {.finding-box}
+**Question answered:** For each ticker in the set, which trigger type — A, B, or C —
+produces the best risk-adjusted outcome at a **`r round(OVERLAY_W * 100)`% overlay weight**
+on the **`r BASELINE_LABEL`** baseline?
+:::
+
+### Baseline: `r BASELINE_LABEL`
+
+```{r baseline-stats}
+bl_stats <- purrr::map_dfr(comp$results, ~ .x$stats %>% filter(type == "Baseline")) %>%
+  distinct(ann_ret, max_dd, ann_vol, ir)
+
+tibble(
+  Metric = c("Composition", "Annualised Return", "MaxDD", "Ann Vol", "IR"),
+  Value  = c(
+    sprintf("%.0f%% SPY + %.0f%% IEF", W_EQ * 100, W_FI * 100),
+    sprintf("%+.1f%%", mean(bl_stats$ann_ret) * 100),
+    sprintf("%.1f%%",  mean(bl_stats$max_dd)  * 100),
+    sprintf("%.1f%%",  mean(bl_stats$ann_vol) * 100),
+    sprintf("%.2f",    mean(bl_stats$ir))
+  )
+) %>%
+  kable(align = "lr") %>%
+  kable_styling(bootstrap_options = "condensed", full_width = FALSE, font_size = 12)
+```
+
+### Trigger type definitions
+
+<div class="type-a">**Type A — Unconditional**
+`(1 − w) × baseline + w × TICKER` — held always at fixed weight.
+No signal, no switching. Suitable for tickers with persistent IR advantage.</div>
+
+<div class="type-b">**Type B — SPY Regime-conditional**
+Blended in Recovery + Consolidation; pure baseline in Fall.
+Trigger: `build_regime_table()` → daily regime label. Lag risk: Fall fires after ~10% drop.</div>
+
+<div class="type-c">**Type C — 200DMA signal-conditional**
+Blended when TICKER is above its own `r MA_WIN`-day MA; pure baseline otherwise.
+Trigger: cumulative price ≥ MA`r MA_WIN`. Whipsaw risk in choppy markets.</div>
+
+---
+
+## Scoreboard
+
+Delta relative to `r BASELINE_LABEL` baseline. **Green = improvement.**
+
+```{r scoreboard, fig.height=max(4, length(comp$results) * 0.6 + 3), echo=TRUE}
+# plot_overlay_scoreboard(comp)
+print(ob$p_scoreboard)
+```
+
+---
+
+## Wealth comparison grid
+
+One panel per ticker — `r round(OVERLAY_W * 100)`% overlay, all three trigger types vs baseline.
+
+```{r grid, fig.height=ceiling(length(comp$results)/2)*3.8+2, echo=TRUE}
+# plot_overlay_grid(comp, rt)
+print(ob$p_grid)
+```
+
+---
+
+## Per-ticker statistics table
+
+```{r stats-table}
+all_stats <- purrr::map_dfr(comp$results, ~ .x$stats) %>%
+  select(ticker, type, ann_ret, max_dd, ann_vol, ir) %>%
+  mutate(
+    ann_ret = sprintf("%+.1f%%", ann_ret * 100),
+    max_dd  = sprintf("%.1f%%",  max_dd  * 100),
+    ann_vol = sprintf("%.1f%%",  ann_vol * 100),
+    ir      = sprintf("%.2f",    ir)
+  ) %>%
+  arrange(ticker, factor(type, levels = c("Baseline", "A", "B", "C")))
+
+all_stats %>%
+  kable(
+    col.names = c("Ticker", "Type", "Ann Ret", "MaxDD", "Ann Vol", "IR"),
+    align = "llrrrr"
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), font_size = 12) %>%
+  row_spec(which(all_stats$type == "Baseline"), background = "#f1f5f9", bold = TRUE) %>%
+  row_spec(which(all_stats$type == "A"),        background = "#ede9fe") %>%
+  row_spec(which(all_stats$type == "B"),        background = "#fef9c3") %>%
+  row_spec(which(all_stats$type == "C"),        background = "#dcfce7")
+```
+
+---
+
+## Session info
+
+```{r session}
+cat(sprintf("Report date   : %s\n", Sys.Date()))
+cat(sprintf("Baseline      : %s (%.0f%% SPY + %.0f%% IEF)\n",
+            BASELINE_LABEL, W_EQ * 100, W_FI * 100))
+cat(sprintf("Overlay weight: %.0f%%\n", OVERLAY_W * 100))
+cat(sprintf("MA window (C) : %d days\n", MA_WIN))
+cat(sprintf("Tickers       : %s\n", paste(tickers, collapse = ", ")))
+```

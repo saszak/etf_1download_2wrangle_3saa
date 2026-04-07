@@ -3,6 +3,14 @@
 # PURPOSE : Shared UI helpers, theme constants, and column definitions.
 # ==============================================================================
 
+# ── Ticker label helper: "TICKER — Short Name" ────────────────────────────────
+# Combines ticker + short_name from etf_metadata (via perf_data$short_name).
+# No truncation needed — short_name is curated to ≤ 18 chars in 00_init_universe.R.
+.tk_label <- function(ticker, short_name) {
+  nm <- coalesce(as.character(short_name), "")
+  ifelse(nchar(nm) > 0L, paste0(ticker, " \u2014 ", nm), ticker)
+}
+
 # ── Theme constants ────────────────────────────────────────────────────────────
 DARK_BG     <- "#111318"
 DARK_PANEL  <- "#16181d"
@@ -164,5 +172,6 @@ col_defs <- list(
   ret_3m          = colDef(show = FALSE),
   saa_depth       = colDef(show = FALSE),
   saa_bucket      = colDef(show = FALSE),
-  cluster         = colDef(show = FALSE)
+  cluster         = colDef(show = FALSE),
+  display_rank    = colDef(show = FALSE)
 )

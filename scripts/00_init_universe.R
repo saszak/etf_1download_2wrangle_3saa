@@ -1,7 +1,7 @@
 ################################################################################
 # PROJECT : ETF_1DOWNLOAD_2WRANGLE_3SAA
 # FILE    : scripts/00_init_universe.R
-# Purpose : Sovereign ETF Universe — 108 tickers, hierarchical asset class tree.
+# Purpose : Sovereign Universe — 138 tickers (108 ETFs + 30 DOW stocks), hierarchical asset class tree.
 #           Promoted from etf_choices.R after duplicate resolution.
 #
 # SCHEMA
@@ -36,7 +36,7 @@ library(tidyverse)
 
 if (!exists("project_tree")) source(here::here("project_tree.R"))
 
-message("Initializing Sovereign Universe (108 Tickers)...")
+message("Initializing Sovereign Universe (138 tickers: 108 ETFs + 30 DOW stocks)...")
 
 etf_metadata <- tribble(
   ~seq_id, ~id,              ~ticker,    ~name,                               ~asset_class,  ~tree_level,   ~geo,    ~sub_block,     ~pf_function,      ~inception,    ~sigma_limit, ~winsor_pct,
@@ -201,8 +201,218 @@ etf_metadata <- tribble(
   105L, "EQ.L1.GL.EURH",  "IWDE.AS", "iShares MSCI World EUR Hedged",      "Equity",      "L1_World",    "Global","World_EURHdg",  "Tactical",        "2010-06-16",  2.2,          0.01,
   106L, "EQ.L2.US.EURH",  "IUES.AS", "iShares S&P 500 EUR Hedged",         "Equity",      "L2_Region",   "US",    "SP500_EURHdg", "Tactical",        "2010-06-16",  2.0,          0.01,
   107L, "FI.HY.US.EURH",  "IHYE.L",  "iShares USD HY Corp Bond EUR Hedged","FixedIncome", "FI_HY",       "US",    "HY_EURHdg",    "Tactical",        "2017-11-06",  2.5,          0.02,
-  108L, "CM.PM.MU.EURH",  "IGLD.DE", "iShares Physical Gold EUR Hedged ETC","Commodity",  "Cmdty_PM",    "Multi", "Gold_EURHdg",  "Real-Shield",     "2022-06-16",  2.2,          0.02
+  108L, "CM.PM.MU.EURH",  "IGLD.DE", "iShares Physical Gold EUR Hedged ETC","Commodity",  "Cmdty_PM",    "Multi", "Gold_EURHdg",  "Real-Shield",     "2022-06-16",  2.2,          0.02,
+
+  # ── DOW 30 Individual Stocks ───────────────────���─────────────────────────────
+  109L, "EQ.L3.US.DOW",   "AAPL",   "Apple Inc",                          "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  110L, "EQ.L3.US.DOW",   "AMGN",   "Amgen Inc",                          "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  111L, "EQ.L3.US.DOW",   "AMZN",   "Amazon.com Inc",                     "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  112L, "EQ.L3.US.DOW",   "AXP",    "American Express Co",                "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  113L, "EQ.L3.US.DOW",   "BA",     "Boeing Co",                          "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.5,          0.04,
+  114L, "EQ.L3.US.DOW",   "CAT",    "Caterpillar Inc",                    "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  115L, "EQ.L3.US.DOW",   "CRM",    "Salesforce Inc",                     "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  116L, "EQ.L3.US.DOW",   "CSCO",   "Cisco Systems Inc",                  "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  117L, "EQ.L3.US.DOW",   "CVX",    "Chevron Corp",                       "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  118L, "EQ.L3.US.DOW",   "DIS",    "Walt Disney Co",                     "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  119L, "EQ.L3.US.DOW",   "GS",     "Goldman Sachs Group",                "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  120L, "EQ.L3.US.DOW",   "HD",     "Home Depot Inc",                     "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  121L, "EQ.L3.US.DOW",   "HON",    "Honeywell Intl",                     "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  122L, "EQ.L3.US.DOW",   "IBM",    "IBM Corp",                           "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  123L, "EQ.L3.US.DOW",   "JNJ",    "Johnson & Johnson",                  "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  124L, "EQ.L3.US.DOW",   "JPM",    "JPMorgan Chase",                     "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  125L, "EQ.L3.US.DOW",   "KO",     "Coca-Cola Co",                       "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.0,          0.01,
+  126L, "EQ.L3.US.DOW",   "MCD",    "McDonald's Corp",                    "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  127L, "EQ.L3.US.DOW",   "MMM",    "3M Co",                              "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  128L, "EQ.L3.US.DOW",   "MRK",    "Merck & Co",                         "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  129L, "EQ.L3.US.DOW",   "MSFT",   "Microsoft Corp",                     "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  130L, "EQ.L3.US.DOW",   "NKE",    "Nike Inc",                           "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  131L, "EQ.L3.US.DOW",   "NVDA",   "NVIDIA Corp",                        "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            4.0,          0.05,
+  132L, "EQ.L3.US.DOW",   "PG",     "Procter & Gamble",                   "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.0,          0.01,
+  133L, "EQ.L3.US.DOW",   "SHW",    "Sherwin-Williams",                   "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  134L, "EQ.L3.US.DOW",   "TRV",    "Travelers Cos",                      "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  135L, "EQ.L3.US.DOW",   "UNH",    "UnitedHealth Group",                 "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            3.0,          0.03,
+  136L, "EQ.L3.US.DOW",   "V",      "Visa Inc",                           "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  137L, "EQ.L3.US.DOW",   "VZ",     "Verizon Communications",             "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.5,          0.02,
+  138L, "EQ.L3.US.DOW",   "WMT",    "Walmart Inc",                        "Equity",      "Stock",       "US",    "DOW30",        "Satellite",       NA,            2.0,          0.01
 )
+
+
+################################################################################
+# SHORT NAMES — curated labels ≤ 18 chars for display in charts / treemaps.
+# Joined into etf_metadata after DOW30 extension so DOW30 stocks automatically
+# fall back to their company name (already short enough from tidyquant).
+################################################################################
+
+.short_names <- tribble(
+  ~ticker,    ~short_name,
+  # ── Equity: L1 World ─────────────────────────────────────────────────────────
+  "URTH",     "MSCI World",
+  "ACWI",     "MSCI ACWI",
+  "ACWX",     "ACWI ex-US",
+  # ── Equity: L2 US Broad ──────────────────────────────────────────────────────
+  "SPY",      "S&P 500",
+  "VTI",      "Total US Mkt",
+  "QQQ",      "Nasdaq 100",
+  "IJH",      "S&P 400 Mid",
+  "IWM",      "Russell 2000",
+  # ── Equity: L2 DM & EM ───────────────────────────────────────────────────────
+  "IEFA",     "MSCI EAFE",
+  "VWO",      "EM Equity",
+  "AAXJ",     "Asia ex-Japan",
+  # ── Equity: L2 Europe ────────────────────────────────────────────────────────
+  "FEZ",      "Euro Stoxx 50",
+  "EZU",      "MSCI Eurozone",
+  "IEV",      "Europe Broad",
+  # ── Equity: L3 DM Countries ──────────────────────────────────────────────────
+  "EWJ",      "Japan",
+  "DXJ",      "Japan Hedged",
+  "DAX",      "Germany DAX",
+  "EWQ",      "France",
+  "EWL",      "Switzerland",
+  "EWU",      "UK Equity",
+  "EWC",      "Canada",
+  "EWA",      "Australia",
+  "EWI",      "Italy",
+  "EWP",      "Spain",
+  # ── Equity: L3 EM Countries ──────────────────────────────────────────────────
+  "INDA",     "India",
+  "FXI",      "China Large-Cap",
+  "EWT",      "Taiwan",
+  "EWY",      "South Korea",
+  "EWZ",      "Brazil",
+  # ── Equity: L3 US Sectors ────────────────────────────────────────────────────
+  "XLK",      "Tech Sector",
+  "XLC",      "Comm Services",
+  "XLV",      "Health Care",
+  "XLF",      "Financials",
+  "XLI",      "Industrials",
+  "XLP",      "Cons Staples",
+  "XLY",      "Cons Disc",
+  "XLE",      "Energy",
+  "XLB",      "Materials",
+  "XLRE",     "Real Estate",
+  "XLU",      "Utilities",
+  # ── Equity: Factors ──────────────────────────────────────────────────────────
+  "QUAL",     "Quality",
+  "MTUM",     "Momentum",
+  "USMV",     "Min Vol",
+  "VTV",      "Value",
+  "DGRW",     "Div Growth",
+  "COWZ",     "Cash Flow",
+  "ACWV",     "Glbl Min Vol",
+  # ── Fixed Income: US Govt ────────────────────────────────────────────────────
+  "SGOV",     "Cash / T-Bills",
+  "SHY",      "Tsy 1-3Y",
+  "IEI",      "Tsy 3-7Y",
+  "IEF",      "Tsy 7-10Y",
+  "TLT",      "Tsy 20Y+",
+  # ── Fixed Income: TIPS ───────────────────────────────────────────────────────
+  "TIP",      "TIPS Broad",
+  "LTPZ",     "TIPS Long",
+  # ── Fixed Income: IG ─────────────────────────────────────────────────────────
+  "AGG",      "US Agg Bond",
+  "LQD",      "IG Corp Bond",
+  "VCIT",     "IG Corp Mid",
+  "MUB",      "Muni Bond",
+  # ── Fixed Income: HY / Intl / EM / Hedge ─────────────────────────────────────
+  "HYG",      "High Yield",
+  "BNDX",     "Intl Bond Hdg",
+  "EMB",      "EM Bond Hard",
+  "EMLC",     "EM Bond Local",
+  "PFIX",     "Rate Hedge",
+  # ── Commodity ────────────────────────────────────────────────────────────────
+  "PDBC",     "Cmdty Broad",
+  "DJP",      "Cmdty Index",
+  "GLD",      "Gold",
+  "SLV",      "Silver",
+  "MOO",      "Agribusiness",
+  "DBA",      "Agriculture",
+  "COPX",     "Copper Miners",
+  "URA",      "Uranium",
+  "LIT",      "Lithium",
+  # ── FX ───────────────────────────────────────────────────────────────────────
+  "UUP",      "USD Index",
+  "FXE",      "EUR/USD",
+  "FXY",      "JPY",
+  "FXB",      "GBP",
+  "FXF",      "CHF",
+  # ── Real Assets ──────────────────────────────────────────────────────────────
+  "IGF",      "Glbl Infra",
+  "IYR",      "US REIT",
+  "VNQI",     "Intl REIT",
+  # ── Satellites: Healthcare ───────────────────────────────────────────────────
+  "VHT",      "Health Care Bd",
+  "IHI",      "Med Devices",
+  "IBB",      "Biotech",
+  "XBI",      "Biotech Small",
+  # ── Satellites: Technology ───────────────────────────────────────────────────
+  "SMH",      "Semiconductors",
+  "CIBR",     "Cybersecurity",
+  "WCLD",     "Cloud",
+  "AIQ",      "AI & Big Data",
+  # ── Satellites: Other ────────────────────────────────────────────────────────
+  "ITA",      "Aerospace/Def",
+  "ITB",      "Homebuilders",
+  "KRE",      "Reg Banks",
+  "IYT",      "Transport",
+  "PSP",      "Private Equity",
+  "IPO",      "IPO",
+  "JEPI",     "Eq Premium Inc",
+  # ── Alternative ──────────────────────────────────────────────────────────────
+  "IBIT",     "Bitcoin",
+  # ── Multi-Asset ──────────────────────────────────────────────────────────────
+  "AOR",      "Growth Alloc",
+  "AOK",      "Consv Alloc",
+  # ── DAA / Overlay ────────────────────────────────────────────────────────────
+  "DBMF",     "Mgd Futures",
+  "CTA",      "Mgd Futures Alt",
+  "BTAL",     "Mkt Neutral",
+  "TAIL",     "Tail Risk",
+  "SH",       "Short S&P 500",
+  "RPAR",     "Risk Parity",
+  # ── EUR-Hedged UCITS ─────────────────────────────────────────────────────────
+  "IWDE.AS",  "MSCI World EUR",
+  "IUES.AS",  "S&P 500 EUR",
+  "IHYE.L",   "HY Bond EUR",
+  "IGLD.DE",  "Gold EUR Hdg",
+  # ── DOW 30 Stocks ─────────────────────────────────────────────────────────────
+  "AAPL",     "Apple",
+  "AMGN",     "Amgen",
+  "AMZN",     "Amazon",
+  "AXP",      "Amex",
+  "BA",       "Boeing",
+  "CAT",      "Caterpillar",
+  "CRM",      "Salesforce",
+  "CSCO",     "Cisco",
+  "CVX",      "Chevron",
+  "DIS",      "Disney",
+  "GS",       "Goldman Sachs",
+  "HD",       "Home Depot",
+  "HON",      "Honeywell",
+  "IBM",      "IBM",
+  "JNJ",      "J&J",
+  "JPM",      "JPMorgan",
+  "KO",       "Coca-Cola",
+  "MCD",      "McDonald's",
+  "MMM",      "3M",
+  "MRK",      "Merck",
+  "MSFT",     "Microsoft",
+  "NKE",      "Nike",
+  "NVDA",     "NVIDIA",
+  "PG",       "P&G",
+  "SHW",      "Sherwin-Williams",
+  "TRV",      "Travelers",
+  "UNH",      "UnitedHealth",
+  "V",        "Visa",
+  "VZ",       "Verizon",
+  "WMT",      "Walmart"
+)
+
+# Join short_name; DOW30 stocks fall back to their company name
+etf_metadata <- etf_metadata %>%
+  left_join(.short_names, by = "ticker") %>%
+  mutate(short_name = coalesce(short_name, name))
+rm(.short_names)
 
 ################################################################################
 # DYNAMIC LOOKUP VECTORS
