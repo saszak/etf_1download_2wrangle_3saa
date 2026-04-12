@@ -345,7 +345,7 @@ plot_regime_rel_heatmap <- function(xts_ret,
         )
       ) %>%
       ungroup() %>%
-      select(ticker, period_label, regime, disp_ret,
+      dplyr::select(ticker, period_label, regime, disp_ret,
              lbl_alpha, lbl_abs, lbl_type, xmin)
   }) %>%
     mutate(
@@ -568,7 +568,7 @@ plot_abs_alpha_regime <- function(xts_ret,
         alpha   = abs_ret - spy_abs
       ) %>%
       ungroup() %>%
-      select(ticker, regime, abs_ret, alpha)
+      dplyr::select(ticker, regime, abs_ret, alpha)
   }) %>%
     mutate(regime = as.character(regime)) %>%
     group_by(ticker, regime) %>%
@@ -656,7 +656,7 @@ plot_abs_alpha_regime <- function(xts_ret,
         alpha = abs_ret - spy_ret
       ) %>%
       ungroup() %>%
-      select(ticker, regime, episode, xmin, abs_ret, spy_ret, alpha)
+      dplyr::select(ticker, regime, episode, xmin, abs_ret, spy_ret, alpha)
   })
 }
 
@@ -860,7 +860,7 @@ plot_regime_fingerprint_box <- function(xts_ret,
     mutate(fill_col = if_else(med >= 0, "#bbf7d0", "#fca5a5"))
 
   ep <- ep %>%
-    left_join(medians %>% select(ticker, regime, fill_col),
+    left_join(medians %>% dplyr::select(ticker, regime, fill_col),
               by = c("ticker", "regime"))
 
   plot_title <- title %||% paste0(

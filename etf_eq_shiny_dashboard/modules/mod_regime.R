@@ -65,6 +65,11 @@ mod_regime_ui <- function(id) {
       )
     ),
 
+    # ── Archetypes ────────────────────────────────────────────────────────────
+    tabPanel("Archetypes",
+      mod_archetypes_ui(NS(id, "arch"))
+    ),
+
     # ── Sync ──────────────────────────────────────────────────────────────────
     tabPanel("Sync",
       layout_columns(
@@ -247,5 +252,8 @@ mod_regime_server <- function(id, filtered, relative_mode, bmk) {
         })
       }
     })
+
+    # ── Archetypes sub-module ─────────────────────────────────────────────────
+    mod_archetypes_server("arch")
   })
 }

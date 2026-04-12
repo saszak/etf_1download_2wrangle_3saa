@@ -137,8 +137,23 @@ message("💾 Persisting refined products...")
 
 write_rds(xts_ret,        here(project_tree$products$refined_ret))
 write_rds(xts_ret_winsor, here("02_data_processed/xts_ret_winsor.rds"))
-write_rds(xts_sigma,      here(project_tree$products$sigma_mat))   
-write_rds(outlier_report, here(project_tree$products$ref_report))  
+write_rds(xts_sigma,      here(project_tree$products$sigma_mat))
+write_rds(outlier_report, here(project_tree$products$ref_report))
+
+# ── Derived portfolio returns (DERIVED_UNIVERSE → xts columns) ────────────────
+# Built here so global.R just does read_rds() — no runtime computation needed.
+if (!exists("DERIVED_UNIVERSE")) source(here("scripts/00_derived_universe.R"))
+xts_derived_ret <- xts_ret[, character(0)]   # empty xts, same index
+for (.i in seq_len(nrow(DERIVED_UNIVERSE))) {
+  .du  <- DERIVED_UNIVERSE[.i, ]
+  .ret <- tryCatch(build_derived_returns(.du, xts_ret), error = function(e) {
+    message("⚠️  Skipping ", .du$id, ": ", conditionMessage(e)); NULL
+  })
+  if (!is.null(.ret)) xts_derived_ret <- merge(xts_derived_ret, .ret, join = "left")
+}
+write_rds(xts_derived_ret, here(project_tree$products$derived_ret))
+message("💾 Derived portfolio returns saved: ", paste(colnames(xts_derived_ret), collapse = " | "))
+rm(.i, .du, .ret, xts_derived_ret)
 
 if (!is.null(xts_rel)) {
   write_rds(xts_rel, here("02_data_processed/xts_rel.rds"))

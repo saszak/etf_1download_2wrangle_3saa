@@ -129,10 +129,10 @@ SM_LABELS <- c("Red", "Pink", "Blue", "LightGreen", "DarkGreen")
   # All pairs where TO > FROM
   grid <- expand.grid(from = yrs, to = yrs) %>%
     filter(to > from) %>%
-    left_join(ann %>% select(year, price_avg, cape_avg),
+    left_join(ann %>% dplyr::select(year, price_avg, cape_avg),
               by = c("from" = "year")) %>%
     rename(p_from = price_avg, cape_from = cape_avg) %>%
-    left_join(ann %>% select(year, price_avg, cape_avg),
+    left_join(ann %>% dplyr::select(year, price_avg, cape_avg),
               by = c("to" = "year")) %>%
     rename(p_to = price_avg, cape_to = cape_avg) %>%
     mutate(

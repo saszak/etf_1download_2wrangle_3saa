@@ -149,6 +149,7 @@ project_tree <- list(
     ma_table          = "./02_data_processed/ma_technical_anchors.rds",
     tech_summary      = "./02_data_processed/technical_summary.rds",
     refined_ret       = "./02_data_processed/xts_ret_returns.rds",
+    derived_ret       = "./02_data_processed/xts_derived_ret.rds",
     sigma_mat         = "./02_data_processed/xts_analytical_sigma.rds",
     ref_report        = "./02_data_processed/outlier_regime_report.rds",
 

@@ -1,5 +1,6 @@
 # ==============================================================================
 # shiny_dashboard/app.R
+# NAME    : ETF_EQ_Dashboard
 # PURPOSE : ETF Universe — Performance Screen
 # RUN     : shiny::runApp("shiny_dashboard")
 # ==============================================================================
@@ -11,7 +12,7 @@ source("global.R")
 ui <- page_sidebar(
   title = tags$span(
     style = "font-weight:700; letter-spacing:0.02em;",
-    "ETF Universe \u2014 Performance Screen"
+    "ETF_EQ_Dashboard"
   ),
 
   tags$head(tags$style(HTML("

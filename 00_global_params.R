@@ -25,5 +25,12 @@ regime_labels <- list(
   "0" = "Risk-Off"
 )
 
-source("./project_tree.R")
-message("✅ Global Parameters Loaded: Data Window starts 2020-01-01.")
+# 5. REBALANCING FREQUENCY
+# Default frequency for all portfolio construction functions.
+# Valid values: "Daily" | "Weekly" | "Monthly" | "Quarterly" | "Annual"
+# Override per portfolio in 00_derived_universe.R or at function call time:
+#   build_derived_returns(du_row, xts_ret, rebal = "Monthly")
+REBAL_FREQ <- "Quarterly"
+
+source(here::here("project_tree.R"))
+message("✅ Global Parameters Loaded: Data Window starts 2020-01-01. REBAL_FREQ = ", REBAL_FREQ)

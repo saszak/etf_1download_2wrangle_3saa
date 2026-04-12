@@ -8,6 +8,25 @@ findings to build a concrete SAA portfolio with institutional mapping.
 
 ---
 
+## Risk/Return calculation policy (MANDATORY)
+Always use **PerformanceAnalytics** as the primary source for all risk/return metrics.
+Never hand-roll annualised return, volatility, Sharpe, drawdown, or IR calculations.
+
+| Metric | Correct call |
+|--------|-------------|
+| Ann. return | `Return.annualized(r, scale = 252)` |
+| Ann. volatility | `StdDev.annualized(r, scale = 252)` |
+| Sharpe ratio | `SharpeRatio.annualized(r, Rf = 0, scale = 252)` |
+| Max drawdown | `maxDrawdown(r)` |
+| Information ratio | `InformationRatio(r, benchmark)` |
+| Calmar ratio | `CalmarRatio(r, scale = 252)` |
+
+Rationale: hand-rolled `sd * sqrt(252)` or `prod(1+r)^(252/n) - 1` inflates numbers
+when the window is < 1 year; PerformanceAnalytics handles edge cases and annualisation
+correctly and consistently.
+
+---
+
 ## Key constants (never change without asking)
 | Constant | Value | Where used |
 |---|---|---|
@@ -29,7 +48,7 @@ findings to build a concrete SAA portfolio with institutional mapping.
 | `xts_ret_winsor` | `02_data_processed/xts_ret_winsor.rds` | Winsorized log returns — for sigma/regime/z-score calculations only; distorts cumulative returns |
 | `xts_rel` | `02_data_processed/xts_rel.rds` | Relative returns (ticker / SPY) |
 | `etf_metadata` | `scripts/00_init_universe.R` | 96-ticker Sovereign Universe with asset_class, tree_level, pf_function |
-| `rt` | built via `build_regime_table(spy_ret, T_FALL)` | Regime table: one row per Fall/Recovery/Consolidation episode |
+| `rt` | built via `build_regime_table(spy_ret, T_FALL)` | Regime table: one row per episode — columns: `regime`, `xmin`, `xmax`, `days`, `period_return`, `ann_return`, `label`, `is_thin` |
 
 ---
 
@@ -326,10 +345,11 @@ KF2 plot C: IR (x) vs ΔMaxDD (y), circle size = P(spread > 0 over 63-day window
 
 ### Session startup (fresh R session)
 ```r
-source("00_libraries.R")                        # all packages + build_regime_table()
-source(here("scripts/00_init_universe.R"))      # etf_metadata
-source(here("scripts/01_etf_wrangle.R"))        # xts_ret, xts_ret_winsor, rt (auto-audit runs)
-rt <- build_regime_table(xts_ret[, "SPY"])      # MUST assign explicitly — stats::rt shadows it
+source("00_libraries.R")                                        # all packages
+source(here("scripts/00_init_universe.R"))                      # etf_metadata
+source(here("scripts/01_etf_wrangle.R"))                        # xts_ret, xts_ret_winsor, rt (auto-audit runs)
+source(here("scripts_spy_dd_regime/spy_dd_regime.R"))           # build_regime_table() lives here
+rt <- build_regime_table(xts_ret[, "SPY"])                      # MUST assign explicitly — stats::rt shadows it
 ```
 
 ### Table-returning functions (atomic building blocks)

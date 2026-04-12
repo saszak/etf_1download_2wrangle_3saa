@@ -19,6 +19,9 @@ library(cowplot)
 library(PerformanceAnalytics)
 library(TTR)
 
+# PerformanceAnalytics pulls in MASS which masks dplyr::select — restore dplyr
+select <- dplyr::select
+
 # ── Utilities + modules FIRST — so theme constants are always defined ──────────
 # Use relative paths — Shiny sets working dir to shiny_dashboard/ at launch
 # Modules and helpers: always re-source so updated signatures are picked up
@@ -32,6 +35,7 @@ source("modules/mod_calyear.R")
 source("modules/mod_comp.R")
 source("modules/mod_technical.R")
 source("modules/mod_regime.R")
+source("modules/mod_archetypes.R")
 source("modules/mod_riskret.R")
 source("modules/mod_surprise.R")
 source("modules/mod_patterns.R")
@@ -51,8 +55,12 @@ rm(.spy_lines)
 
 # ── Root project bridge ────────────────────────────────────────────────────────
 if (!exists("project_tree")) source(here::here("project_tree.R"))
+if (!exists("REBAL_FREQ"))   source(here::here("00_global_params.R"))
 if (!exists("etf_metadata") || !"short_name" %in% names(etf_metadata))
   source(here::here(project_tree$scripts$init))
+# Always re-source — ensures build_derived_returns() and other function
+# definitions stay current even in warm R sessions (no !exists guard here).
+source(here::here("scripts/00_derived_universe.R"))
 
 if (!exists("raw_data"))       raw_data       <- read_rds(here::here(project_tree$products$raw_p_d))
 if (!exists("tech_summary"))   tech_summary   <- read_rds(here::here(project_tree$products$tech_summary))
@@ -62,6 +70,31 @@ if (!exists("outlier_report")) outlier_report <- read_rds(here::here(project_tre
 if (!exists("xts_ret_shiny")) xts_ret_shiny <- read_rds(here::here(project_tree$products$refined_ret))
 if (!exists("xts_rel_shiny")) xts_rel_shiny <- read_rds(here::here("02_data_processed/xts_rel.rds"))
 if (!exists("rt_shiny"))      rt_shiny      <- build_regime_table(xts_ret_shiny[, "SPY"])
+
+# ── Universe sync check ────────────────────────────────────────────────────────
+# Warn at startup if any universe tickers are missing from the loaded RDS.
+# Root cause: RDS was built before ticker was added. Fix: re-run 01_etf_wrangle.R
+.missing_tks <- setdiff(etf_metadata$ticker, colnames(xts_ret_shiny))
+if (length(.missing_tks) > 0) {
+  message(
+    "\n⚠️  xts_ret_shiny is OUT OF SYNC with etf_metadata (",
+    length(.missing_tks), " tickers missing):\n",
+    paste(" -", .missing_tks, collapse = "\n"), "\n",
+    "→ Re-run scripts/01_etf_wrangle.R to rebuild the RDS, then restart the app.\n"
+  )
+}
+rm(.missing_tks)
+
+# ── Merge pre-built derived portfolio columns into xts_ret_shiny ───────────────
+# xts_derived_ret.rds is built by 01_etf_wrangle.R — no runtime computation here.
+if (!exists("xts_derived_ret"))
+  xts_derived_ret <- read_rds(here::here(project_tree$products$derived_ret))
+new_cols <- setdiff(colnames(xts_derived_ret), colnames(xts_ret_shiny))
+if (length(new_cols) > 0)
+  xts_ret_shiny <- merge(xts_ret_shiny, xts_derived_ret[, new_cols, drop = FALSE], join = "left")
+message("✅ xts_ret_shiny derived cols: ",
+        paste(intersect(DERIVED_UNIVERSE$id, colnames(xts_ret_shiny)), collapse = " | "),
+        "  [total cols: ", ncol(xts_ret_shiny), "]")
 
 # ── Date constants ─────────────────────────────────────────────────────────────
 today     <- Sys.Date()
@@ -95,16 +128,16 @@ perf_data <- raw_data %>%
     .groups   = "drop"
   ) %>%
   left_join(
-    etf_metadata %>% select(ticker, name, short_name, asset_class, pf_function,
+    etf_metadata %>% dplyr::select(ticker, name, short_name, asset_class, pf_function,
                             tree_level, sub_block),
     by = c("symbol" = "ticker")
   ) %>%
   left_join(
-    tech_summary %>% select(ticker, trend_regime, momentum_status),
+    tech_summary %>% dplyr::select(ticker, trend_regime, momentum_status),
     by = c("symbol" = "ticker")
   ) %>%
   left_join(
-    outlier_report %>% select(ticker, label),
+    outlier_report %>% dplyr::select(ticker, label),
     by = c("symbol" = "ticker")
   ) %>%
   filter(!is.na(ret_ytd), symbol %in% etf_metadata$ticker) %>%
@@ -163,9 +196,30 @@ if (!exists("eq_coverage")) {
       analyst    = Analyst,
       mkt_cap    = `Market Value in bn`
     ) %>%
-    select(ticker, Company, region, sector, rating, risk, top_pick,
+    dplyr::select(ticker, Company, region, sector, rating, risk, top_pick,
            exp_ret, tgt_price, price, upside_pct, div_yield,
            pe, eps25, eps26, analyst, mkt_cap)
+}
+
+# ── Regime Archetypes (equity tickers vs SPY) ─────────────────────────────────
+if (!exists("archetype_data")) {
+  source(here::here("scripts_saa_taa/equity_spread_screen.R"))
+  .screen <- equity_spread_screen(xts_ret_shiny, xts_rel_shiny, etf_metadata, rt_shiny)
+  archetype_data <- .screen %>%
+    mutate(
+      archetype = dplyr::case_when(
+        rho_full < 0.75                                                      ~ "Corr-Fail",
+        Fall_modal_type == "LOSS" & Recovery_modal_type == "ALPHA" &
+          Consolidation_modal_type == "ALPHA"                                ~ "Cycle Amplifier",
+        Fall_modal_type == "LOSS" & Recovery_modal_type == "ALPHA" &
+          Consolidation_modal_type == "LAG"                                  ~ "Recovery Sprinter",
+        Fall_modal_type %in% c("STABLE", "HEDGE") &
+          Recovery_modal_type == "LAG"                                       ~ "Defensive Burden",
+        Fall_modal_type == "LOSS" & Recovery_modal_type == "LAG"             ~ "All-Regime Drag",
+        TRUE                                                                 ~ "Other"
+      )
+    )
+  rm(.screen)
 }
 
 # ── 200DMA trend signals (used by Plots tab) ───────────────────────────────────

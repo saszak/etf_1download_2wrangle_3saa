@@ -1,0 +1,399 @@
+---
+title: "Project Progress"
+subtitle: "ETF Intelligence Project — Live System Status"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 2
+    theme: flatly
+    highlight: tango
+    self_contained: true
+---
+
+```{css, echo=FALSE}
+body { font-family: "Inter", "Helvetica Neue", Arial, sans-serif; background: #f4f6fb; }
+h1, h2, h3 { color: #1B2A4A; font-weight: 800; }
+h2 { border-bottom: 2px solid #1B2A4A; padding-bottom: 6px; margin-top: 2em; }
+
+.badge {
+  display: inline-block; font-size: 10px; font-weight: 800;
+  letter-spacing: .08em; text-transform: uppercase;
+  padding: 2px 9px; border-radius: 10px; margin-right: 4px;
+}
+.badge-done    { background: #22c55e; color: #fff; }
+.badge-wip     { background: #f59e0b; color: #fff; }
+.badge-planned { background: #9ca3af; color: #fff; }
+.badge-blocked { background: #ef4444; color: #fff; }
+
+.stat-box {
+  display: inline-block;
+  background: #fff; border: 1px solid #dde;
+  border-radius: 8px; padding: 14px 22px;
+  margin: 6px 8px 6px 0;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  min-width: 120px; text-align: center;
+}
+.stat-label { font-size: 10px; color: #6b7280; text-transform: uppercase;
+              letter-spacing: .07em; margin-bottom: 4px; }
+.stat-value { font-size: 22px; font-weight: 800; color: #1B2A4A; }
+.stat-sub   { font-size: 11px; color: #9ca3af; margin-top: 2px; }
+
+.finding-box {
+  background: #f0f7ff; border-left: 4px solid #1B2A4A;
+  padding: 10px 16px; margin: 12px 0; border-radius: 0 4px 4px 0;
+  font-size: 13px;
+}
+.warn-box {
+  background: #fffbeb; border-left: 4px solid #f59e0b;
+  padding: 10px 16px; margin: 12px 0; border-radius: 0 4px 4px 0;
+  font-size: 13px;
+}
+.run-box {
+  background: #1e1e2e; color: #cdd6f4; font-family: monospace;
+  font-size: 12px; padding: 10px 16px; border-radius: 6px; margin: 8px 0;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(here)
+library(xts)
+```
+
+```{r load-data, include=FALSE}
+# ── Load core data objects from pre-built RDS (avoids re-running pipeline) ──
+xts_ret <- readRDS(here("02_data_processed/xts_ret_returns.rds"))
+
+# etf_metadata — source into temp env to avoid side-effects
+.e <- new.env(parent = globalenv())
+source(here("scripts/00_init_universe.R"), local = .e)
+etf_metadata <- .e$etf_metadata
+
+# build_regime_table lives in spy_dd_regime.R
+source(here("scripts_spy_dd_regime/spy_dd_regime.R"))
+rt <- build_regime_table(xts_ret[, "SPY"])
+
+# ── Derived stats ────────────────────────────────────────────────────────────
+data_start <- as.Date(index(xts_ret)[1])
+data_end   <- as.Date(index(xts_ret)[nrow(xts_ret)])
+data_days  <- nrow(xts_ret)
+data_years <- round(as.numeric(data_end - data_start) / 365.25, 1)
+n_tickers  <- ncol(xts_ret)
+data_fresh <- as.numeric(Sys.Date() - data_end)
+
+n_fall    <- sum(rt$regime == "Fall")
+n_rec     <- sum(rt$regime == "Recovery")
+n_consol  <- sum(rt$regime == "Consolidation")
+```
+
+---
+
+## System Snapshot
+
+<div>
+<div class="stat-box">
+  <div class="stat-label">Tickers</div>
+  <div class="stat-value">`r n_tickers`</div>
+  <div class="stat-sub">Sovereign Universe</div>
+</div>
+<div class="stat-box">
+  <div class="stat-label">Data Start</div>
+  <div class="stat-value">`r format(data_start, "%b %Y")`</div>
+  <div class="stat-sub">`r data_years` years</div>
+</div>
+<div class="stat-box">
+  <div class="stat-label">Last Price</div>
+  <div class="stat-value">`r format(data_end, "%b %d")`</div>
+  <div class="stat-sub">`r data_fresh` days ago</div>
+</div>
+<div class="stat-box">
+  <div class="stat-label">Trading Days</div>
+  <div class="stat-value">`r format(data_days, big.mark=",")`</div>
+  <div class="stat-sub">clean returns</div>
+</div>
+<div class="stat-box">
+  <div class="stat-label">Regime Episodes</div>
+  <div class="stat-value">`r nrow(rt)`</div>
+  <div class="stat-sub">`r n_fall`F / `r n_rec`R / `r n_consol`C</div>
+</div>
+</div>
+
+```{r freshness-warn, results='asis'}
+if (data_fresh > 5) {
+  cat(sprintf(
+    '<div class="warn-box">⚠️ Data is <strong>%d days stale</strong>. Re-run <code>scripts/01_etf_wrangle.R</code> to refresh.</div>',
+    data_fresh
+  ))
+}
+```
+
+---
+
+## Current Market State
+
+```{r market-state, results='asis'}
+ms_out <- tryCatch({
+  source(here("scripts_market_state/ms_vector_state.R"))
+  source(here("scripts_market_state/ms_sector_pattern.R"))
+  source(here("scripts_market_state/ms_risk_allocation.R"))
+  ms_hist <- build_market_state_history(xts_ret, min_persist = 5L)
+  ra_hist <- build_risk_allocation_history(xts_ret, min_persist = 5L)
+  list(ms = ms_hist, ra = ra_hist)
+}, error = function(e) e)
+
+if (inherits(ms_out, "error")) {
+  cat(sprintf(
+    '<div class="warn-box">⚠️ Market state unavailable: <code>%s</code></div>',
+    conditionMessage(ms_out)
+  ))
+} else {
+  cat("<div class='finding-box'>\n<pre>")
+  capture.output(print_market_state(ms_out$ms))    |> paste(collapse = "\n") |> cat()
+  cat("\n")
+  capture.output(print_risk_allocation(ms_out$ra)) |> paste(collapse = "\n") |> cat()
+  cat("</pre>\n</div>")
+}
+```
+
+---
+
+## Universe Composition
+
+```{r universe-table}
+etf_metadata |>
+  count(asset_class, name = "n") |>
+  arrange(desc(n)) |>
+  rename(`Asset Class` = asset_class, Tickers = n) |>
+  kable(align = c("l","c")) |>
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover","condensed","bordered"),
+                font_size = 13) |>
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white")
+```
+
+---
+
+## Phase Completion
+
+```{r phase-table}
+phases <- tribble(
+  ~Phase, ~Description,                         ~Status,     ~`Key Output`,
+  "1",    "Data Infrastructure",                "✅ Done",    "`xts_ret`, `xts_ret_winsor`, `xts_rel`, `etf_metadata`",
+  "2",    "Regime Engine (3-state SPY DD)",      "✅ Done",    "`build_regime_table()`, heatmaps, state machine",
+  "3",    "SAA Portfolio Construction",          "✅ Done",    "SAA 65/35, walk-forward DAA, rebalancing study",
+  "4",    "DD Overlay Optimizer",               "✅ Done",    "Pareto frontier, 4 MaxDD targets, enhancer screen",
+  "5",    "Market State Framework (3-layer)",   "✅ Done",    "`ms_vector_state`, `ms_sector_pattern`, `ms_risk_allocation`",
+  "6",    "Key Findings (KF1–KF4)",             "✅ Done",    "Anti-diversification, ρ>0.75 rule, cycle amplifiers",
+  "7",    "ETF_EQ_Dashboard (Shiny)",           "🔄 Active",  "`etf_eq_shiny_dashboard/` — rename + Archetypes module",
+  "8",    "Derived Universe Registry",          "🔄 Active",  "`scripts/00_derived_universe.R` — constructed portfolios",
+  "9",    "Dashboard: Sectors + Macro tabs",    "📋 Planned", "Sector bars (YTD/2025) + SPX YoY vs EPS scatter",
+  "10",   "Pending tickers (ILF/SH/DBMF)",     "📋 Planned", "Add to Sovereign Universe + re-wrangle"
+)
+
+phases |>
+  kable(align = c("c","l","c","l")) |>
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover","condensed","bordered"),
+                font_size = 13) |>
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") |>
+  row_spec(which(str_detect(phases$Status, "✅")), background = "#f0fdf4") |>
+  row_spec(which(str_detect(phases$Status, "🔄")), background = "#fffbeb") |>
+  row_spec(which(str_detect(phases$Status, "📋")), background = "#f9fafb")
+```
+
+---
+
+## Dashboard Module Status
+
+```{r dashboard-modules}
+mods <- tribble(
+  ~Module,             ~File,                    ~Status,      ~Notes,
+  "Table",             "mod_perf_table.R",       "✅ Done",     "Searchable performance table",
+  "Treemap",           "mod_treemap.R",           "🔄 Modified", "Uncommitted changes",
+  "Plots",             "mod_plots.R",             "✅ Done",     "",
+  "Comp",              "mod_comp.R",              "✅ Done",     "",
+  "Technical",         "mod_technical.R",         "✅ Done",     "200DMA signals",
+  "Regime",            "mod_regime.R",            "🔄 Modified", "Uncommitted changes; Archetypes sub-panel pending wiring",
+  "RiskRet",           "mod_riskret.R",           "✅ Done",     "",
+  "Patterns",          "mod_patterns.R",          "✅ Done",     "Added in last commit",
+  "AbsRel",            "mod_absrel.R",            "✅ Done",     "",
+  "CalYear",           "mod_calyear.R",           "✅ Done",     "",
+  "Surprise",          "mod_surprise.R",          "✅ Done",     "",
+  "Archetypes",        "mod_archetypes.R",        "🔄 Built",    "Module built; not yet wired into app.R",
+  "Sectors",           "—",                       "📋 Planned",  "Sector bars (2025 vs YTD) + momentum bubble",
+  "Macro",             "—",                       "📋 Planned",  "SPX YoY vs EPS scatter (live Yardeni)"
+)
+
+mods |>
+  kable(align = c("l","l","c","l")) |>
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover","condensed","bordered"),
+                font_size = 13) |>
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") |>
+  row_spec(which(str_detect(mods$Status, "✅")), background = "#f0fdf4") |>
+  row_spec(which(str_detect(mods$Status, "🔄")), background = "#fffbeb") |>
+  row_spec(which(str_detect(mods$Status, "📋")), background = "#f9fafb")
+```
+
+---
+
+## Report Inventory
+
+```{r report-table}
+reports <- tribble(
+  ~`#`, ~Report,                            ~File,                                    ~Format,       ~Parameterised,
+  "1",  "Executive Summary",                "Rmd/executive_summary.Rmd",              "HTML",        "No",
+  "2",  "SPY Tactical Replacement Study",   "Rmd/SPY_tactical_replacement_study.Rmd", "HTML / PDF",  "No",
+  "3",  "SPY Regime & State Machine",       "Rmd/spy_regime_statemachine_report.Rmd", "HTML / PDF",  "No",
+  "4",  "L/S Pair Factsheet",              "Rmd/pair_factsheet.Rmd",                 "HTML / PDF",  "Yes — ticker",
+  "5",  "Exante Hypothesis",               "Rmd/exante_hypothesis_report.Rmd",       "HTML",        "Yes — bmk",
+  "6",  "Long/Short Overlay",              "Rmd/long_short_overlay_report.Rmd",      "HTML / PDF",  "No",
+  "7",  "Safe Haven Regime Signal",        "Rmd/safe_haven_regime_report.Rmd",       "HTML",        "No",
+  "8",  "SAA Execution Report",            "Rmd/saa_execution_report.Rmd",           "HTML",        "No",
+  "9",  "Universe Pair Analysis v2",       "Rmd/universe_pair_analysis_v2.Rmd",      "HTML",        "No",
+  "10", "Pair Analysis & Portfolio Const.","Rmd/pair_analysis_portfolio_construction.Rmd","HTML",   "No",
+  "11", "Market State Report",             "Rmd/market_state_report.Rmd",            "HTML",        "Yes — min_persist, t_fall",
+  "12", "Rebalancing Drift Guide",         "Rmd/rebalancing_drift_guide.Rmd",        "HTML",        "No",
+  "13", "SAA Overlay Workflow Guide",      "Rmd/saa_overlay_workflow_guide.Rmd",     "HTML",        "No",
+  "14", "Overlay Backtest",               "Rmd/overlay_backtest_report.Rmd",        "HTML",        "No",
+  "15", "TAA Screen",                      "Rmd/taa_screen_report.Rmd",              "HTML",        "No",
+  "16", "Eq Factsheets (Batch)",          "Rmd/eq_factsheets_batch.Rmd",            "HTML",        "Yes — tickers",
+  "17", "KF3 Trend Reversal",             "Rmd/kf3_trend_reversal_report.Rmd",      "HTML",        "No",
+  "18", "Calendar Analog",               "Rmd/calendar_analog_report.Rmd",         "HTML",        "No",
+  "19", "Analysis Directory",            "Rmd/analysis_directory.Rmd",             "HTML",        "No"
+)
+
+reports |>
+  kable(align = c("c","l","l","c","c")) |>
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover","condensed","bordered"),
+                font_size = 13) |>
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") |>
+  column_spec(1, bold = TRUE, color = "#1B2A4A", width = "2em") |>
+  column_spec(5, bold = TRUE)
+```
+
+---
+
+## Regime Episode Summary
+
+```{r regime-summary}
+rt |>
+  group_by(regime) |>
+  summarise(
+    Episodes     = n(),
+    `Avg Days`   = round(mean(days), 0),
+    `Avg Return` = scales::percent(mean(period_return, na.rm = TRUE), accuracy = 0.1),
+    `Min Return` = scales::percent(min(period_return,  na.rm = TRUE), accuracy = 0.1),
+    `Max Return` = scales::percent(max(period_return,  na.rm = TRUE), accuracy = 0.1),
+    .groups = "drop"
+  ) |>
+  arrange(match(regime, c("Fall","Recovery","Consolidation"))) |>
+  kable(align = c("l","c","c","c","c","c")) |>
+  kable_styling(full_width = FALSE,
+                bootstrap_options = c("hover","condensed","bordered"),
+                font_size = 13) |>
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") |>
+  row_spec(1, background = "#fef2f2") |>   # Fall
+  row_spec(2, background = "#f0fdf4") |>   # Recovery
+  row_spec(3, background = "#f0f9ff")      # Consolidation
+```
+
+---
+
+## Confirmed Key Findings
+
+<div class="finding-box">
+**KF1 — Anti-diversification** · `key_findings/kf1_anti_diversification.R`
+For a long-only blended portfolio, MaxDD is minimised by minimising **standalone DD**, not correlation.
+A ρ=0.8 ticker with 15% DD beats a ρ=0.1 ticker with 40% DD. Confirmed across full 96-ticker universe.
+</div>
+
+<div class="finding-box">
+**KF2 — L/S pair requires ρ > 0.75** · `key_findings/kf2_ls_pair_selection.R`
+Only SMH (IR=0.90), XLK (IR=0.51), QQQ (IR=0.48) qualify. All US tech/growth equity.
+No fixed income or commodity passes `RHO_SCREEN = 0.75` + `MDD_SCREEN = −30%`.
+</div>
+
+<div class="finding-box">
+**KF3 — Trend reversals cluster at transitions** · `key_findings/kf3_trend_reversal.R`
+Winner→Loser cohort reversals peak in the 8-week window around regime transitions.
+`LOOKBACK=60d`, `PERSIST_N=3 weeks`, `TRANSIT_WIN=8 weeks`.
+</div>
+
+<div class="finding-box">
+**KF4 — Phase 2 overlay framework** · `key_findings/kf4_*.R`
+Stabilizers: FULL / PARTIAL / CONDITIONAL classifications. Enhancers: A / B / C types.
+Overlay backtest (option B): `r_SAA + α × (r_candidate − r_SAA)`.
+</div>
+
+<div class="finding-box">
+**KF5 — Regime-rotation TAA does NOT beat passive 60/40** (confirmed)
+Walk-forward DAA: ~6.7% vs passive ~7.6%. Root causes: (1) international drag during US decade,
+(2) regime detection lag, (3) tilts too small. Project objective = **DD reduction**, not return enhancement.
+</div>
+
+<div class="finding-box">
+**KF6 — Threshold ±5% rebalancing is the practical optimum** (confirmed)
+Captures ~85% of the daily rebalancing bonus at 1/20th of trading activity.
+Rebalancing bonus ≈ ½ × w_SPY × w_IEF × σ²(SPY − IEF) — always positive.
+</div>
+
+---
+
+## Pending Items
+
+```{r pending}
+pending <- tribble(
+  ~Priority, ~Item,                                         ~Category,      ~Notes,
+  "High",    "Wire mod_archetypes.R into app.R Regime tab", "Dashboard",    "Module built; needs UI + server registration",
+  "High",    "Commit rename shiny_dashboard → etf_eq_shiny_dashboard", "Git", "mod_regime + mod_treemap modified",
+  "High",    "Commit 00_derived_universe.R",                "Infrastructure","Derived portfolio registry",
+  "Medium",  "Add Sectors tab to dashboard",               "Dashboard",    "Sector bars (2025 vs YTD) + momentum bubble",
+  "Medium",  "Add Macro tab to dashboard",                 "Dashboard",    "SPX YoY vs EPS scatter (Yardeni data)",
+  "Medium",  "Download ILF / SH / DBMF",                  "Universe",     "3 missing tickers for institutional SAA",
+  "Low",     "Regime plot kernel refactor",                "Refactor",     "Shared kernel + decorator for spy_dd_regime",
+  "Low",     "FMP analyst targets integration",            "Data",         "Live 12M price targets via FMP free API",
+  "Low",     "MA50/MA200 spread annotation in plot_ma_gauge()", "Viz",    "z-score or spread strip below gauge"
+)
+
+pending |>
+  kable(align = c("c","l","c","l")) |>
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("hover","condensed","bordered"),
+                font_size = 13) |>
+  row_spec(0, bold = TRUE, background = "#1B2A4A", color = "white") |>
+  row_spec(which(pending$Priority == "High"),   background = "#fef2f2") |>
+  row_spec(which(pending$Priority == "Medium"), background = "#fffbeb") |>
+  row_spec(which(pending$Priority == "Low"),    background = "#f9fafb")
+```
+
+---
+
+## Session Startup (reference)
+
+<div class="run-box">
+source("00_libraries.R")
+source(here("scripts/00_init_universe.R"))
+source(here("scripts/01_etf_wrangle.R"))
+rt &lt;- build_regime_table(xts_ret[, "SPY"])   # must assign explicitly — stats::rt shadows it
+</div>
+
+## Render This Report
+
+<div class="run-box">
+rmarkdown::render(here::here("project_roadmap_status/project_progress.Rmd"),
+&nbsp;&nbsp;output_file = here::here("03_reports/project_progress.html"),
+&nbsp;&nbsp;envir = new.env())
+</div>
+
+---
+
+*Generated `r Sys.Date()` · ETF Intelligence Project · Sovereign Universe `r n_tickers` tickers · Benchmark: SPY*
